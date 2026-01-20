@@ -15,19 +15,6 @@ This capstone challenges you to build a predictive Bitcoin DCA (Dollar Cost Aver
 *   **IP/Licensing:** Everything produced is open-sourced under **MIT** (contributors retain attribution).
 *   **Contacts:** Mohammad Ashkani (Comms Lead) and Mateusz Faltyn (Technical Lead).
 
----
-
-## 🎓 Capstone Expectations (LSE ST498 2025–26 structure)
-
-*   **Team model:** Student team + LSE supervisor + partner supervisor; applied DS collaboration.
-*   **Mandatory deliverables:**
-    *   **Presentation 1:** objectives + plan (slides + ~10 min).
-    *   **Presentation 2:** project update + partial results (updated slides + ~10 min).
-    *   **Draft group report:** intro + literature + methods + partial results.
-    *   **Final group + individual reports:** full results, analysis, discussion.
-*   **Milestones (high level):** allocation + kickoff early; stage gates for **data acquisition** and **writing/results**; formal supervision ends before final submission.
-*   **Student responsibilities:** project management (plan, milestones, individual contributions), technical execution (research/analysis/software), proactive unblocking (data/APIs/compute), and presentation/report writing.
-*   **Compliance:** follow any onboarding/NDA needs; don’t disclose project info publicly without partner authorization; generative AI is allowed but must be agreed with supervisor/partner and acknowledged in outputs.
 
 ---
 ## 🎯 The Capstone Objective
