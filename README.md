@@ -19,16 +19,36 @@ This capstone challenges you to build a Bitcoin DCA (Dollar Cost Averaging) stra
 
 ## The Capstone Objective
 
-The goal of this project is to evolve a basic MVRV-based DCA model into a sophisticated, market-aware strategy.
+The goal of this project is to evolve a basic 200-day MA DCA model into a sophisticated, market-aware strategy.
 
 **The Challenge:** Improve the integration of Polymarket data into the model to produce superior predictive signals.
 
 ### Your Tasks
 
 1. **Fork the Template**: Create your own version of this repository to build your model.
-2. **Integrate Polymarket Data**: Leverage the provided Polymarket datasets (Politics, Finance, Crypto) to extract predictive signals.
-3. **Direct Integration**: Modify the core model logic to incorporate these signals alongside traditional indicators like MVRV and Moving Averages.
+2. **Integrate Polymarket Data**: Leverage the provided Polymarket datasets (Politics, Finance, Crypto) to extract predictive signals using `load_polymarket_data()`.
+3. **Direct Integration**: Modify the core model logic to incorporate these signals alongside the 200-day Moving Average baseline.
 4. **Outperform the Baseline**: Demonstrate through backtesting that your integrated model provides superior risk-adjusted outcomes compared to the foundation model.
+
+---
+
+### How to Run Backtests
+
+Run the following commands from the root directory:
+
+**Baseline Model (Template):**
+```bash
+python -m template.backtest_template
+```
+
+**Enhanced Model (Example 1):**
+```bash
+python -m example_1.run_backtest
+```
+
+Detailed documentation can be found in [Backtest Documentation](file:///Users/mattfaltyn/Desktop/hypertrial_trilemma/foundation/bitcoin-analytics-capstone-template/template/backtest_template.md).
+
+---
 
 ---
 
@@ -62,19 +82,19 @@ python data/download_data.py
 
 **What's included:**
 
-* **CoinMetrics BTC Data**: Historical price and MVRV metrics (`data/Coin Metrics/`).
-* **Polymarket Data**: 5 Parquet files containing trades, odds history, and market metadata (`data/Polymarket/`).
+* **CoinMetrics BTC Data**: Historical price data (`data/Coin Metrics/`).
+* **Polymarket Data**: 6 Parquet files containing trades, odds history, and market metadata (`data/Polymarket/`). Use `load_polymarket_data()` from `template/prelude_template.py` to load all raw data files.
 * **Data Schemas**: Detailed documentation in `data/Polymarket/polymarket_btc_analytics_schema.md`.
 
 ---
 
 ## The Foundation (Baseline Model)
 
-The repository provides a working **Foundation Model** located in `template/`. This model uses:
+The repository provides a working **Foundation Model** located in `template/`. This simplified baseline model uses:
 
-* **MVRV Z-score**: Buy more when undervalued (Deep Value Zone).
-* **200-day MA**: Trend-following signal modulation.
-* **Momentum/Volatility**: Acceleration and dampening modifiers.
+* **200-day Moving Average**: Buy more when price is below the 200-day MA, buy less when above.
+
+This simple strategy serves as a baseline for comparison. Your task is to enhance it with Polymarket data and other signals.
 
 ### Running the Baseline
 
@@ -90,7 +110,25 @@ python -m template.backtest_template
 
 Your task is to modify `template/model_development_template.py` to integrate Polymarket signals.
 
-> **Important:** While the primary goal is Polymarket integration, you are also encouraged to make changes to the base model logic (MVRV, MA, etc.) if it helps you better incorporate the prediction market data and improve the model.
+> **Important:** While the primary goal is Polymarket integration, you are also encouraged to make changes to the base model logic (e.g., add MVRV, additional indicators) if it helps you better incorporate the prediction market data and improve the model.
+
+### Data Loading
+
+The template provides `load_polymarket_data()` in `template/prelude_template.py` to load all raw Polymarket parquet files:
+
+```python
+from template.prelude_template import load_polymarket_data
+
+# Load all raw Polymarket data
+polymarket_data = load_polymarket_data()
+# Returns dict with keys: 'markets', 'tokens', 'trades', 'odds_history', 'event_stats', 'summary'
+
+# Access specific datasets
+markets_df = polymarket_data['markets']
+trades_df = polymarket_data['trades']
+```
+
+For model-specific processing (e.g., extracting BTC sentiment), define your own functions in your model file. See `example_1/model_development_example_1.py` for an example.
 
 ### Potential Signal Leads
 
@@ -104,15 +142,14 @@ Your task is to modify `template/model_development_template.py` to integrate Pol
 ```
 .
 ├── template/                        # DIRECTORY TO FORK
+│   ├── prelude_template.py          # Data loading utilities (includes load_polymarket_data())
 │   ├── model_development_template.py # INTEGRATE POLYMARKET SIGNALS HERE
 │   ├── backtest_template.py         # Evaluate your new strategy
-│   ├── model_template.md            # Detailed MVRV logic documentation
+│   ├── model_template.md            # Model logic documentation
 │   └── backtest_template.md         # Backtest engine documentation
 ├── example_1/                       # REFERENCE IMPLEMENTATION
-│   ├── model_development_example_1.py# Example Polymarket integration
-│   ├── backtest_example_1.py        # Example backtest
-│   ├── model_example_1.md           # Documentation for updated logic
-│   └── backtest_example_1.md        # Documentation for Example 1 results
+│   ├── model_development_example_1.py# Example Polymarket integration (imports from template)
+│   └── model_example_1.md           # Documentation for updated logic
 ├── data/                            # Bitcoin & Polymarket source data
 ├── output/                          # Your strategy's performance visualizations
 └── tests/                           # Ensure your model remains stable
@@ -122,13 +159,15 @@ Your task is to modify `template/model_development_template.py` to integrate Pol
 
 ## Example Implementation: `example_1`
 
-To help you get started, we've provided `example_1/`. This is a complete "fork" of the `template/` directory that demonstrates:
+To help you get started, we've provided `example_1/`. This demonstrates:
 
-1. **Data Loading**: How to use `prelude_example_1.py` to ingest Polymarket parquet files.
+1. **Data Loading**: How to use `load_polymarket_data()` from template and create model-specific processing functions (e.g., `load_polymarket_btc_sentiment()`).
 2. **Signal Generation**: A concrete example of mapping Polymarket odds to model modifiers.
-3. **Backtesting**: Running the evaluation suite on the integrated model.
+3. **Import Pattern**: Shows how to import from `template/` modules and extend them with model-specific logic.
 
-**Study `example_1/` to understand the workflow before building your own model in a new folder.**
+**Study `example_1/model_development_example_1.py` to understand the workflow before building your own model in a new folder.**
+
+Note: Example implementations should import from `template/` rather than duplicating prelude and backtest files.
 
 ---
 
@@ -144,9 +183,9 @@ Your integrated model will be evaluated on the following (automated via `backtes
 
 ## Documentation
 
-* **Model Logic**: See `docs/model.md` for the current MVRV implementation.
+* **Model Logic**: See `template/model_template.md` for model documentation.
 
-* **Backtest Framework**: See `docs/model_backtest.md` for scoring methodology.
+* **Backtest Framework**: See `template/backtest_template.md` for scoring methodology.
 * **Polymarket Schema**: See `data/Polymarket/polymarket_btc_analytics_schema.md`.
 
 ---

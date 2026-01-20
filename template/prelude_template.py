@@ -92,6 +92,66 @@ def load_data():
     return df
 
 
+def load_polymarket_data() -> dict[str, pd.DataFrame]:
+    """Load all raw Polymarket data files.
+    
+    Returns:
+        Dictionary mapping file names to DataFrames:
+        - 'markets': finance_politics_markets.parquet
+        - 'tokens': finance_politics_tokens.parquet
+        - 'trades': finance_politics_trades.parquet
+        - 'odds_history': finance_politics_odds_history.parquet
+        - 'event_stats': finance_politics_event_stats.parquet
+        - 'summary': finance_politics_summary.parquet
+        
+    Missing files will be logged as warnings and excluded from the returned dictionary.
+    """
+    base_dir = Path(__file__).parent.parent
+    polymarket_dir = base_dir / "data" / "Polymarket"
+    
+    # Fallback to CWD relative
+    if not polymarket_dir.exists():
+        polymarket_dir = Path("data/Polymarket")
+    
+    if not polymarket_dir.exists():
+        logging.warning(
+            f"Polymarket data directory not found at {polymarket_dir}. "
+            "Returning empty dictionary."
+        )
+        return {}
+    
+    # Map of file keys to actual filenames
+    file_map = {
+        "markets": "finance_politics_markets.parquet",
+        "tokens": "finance_politics_tokens.parquet",
+        "trades": "finance_politics_trades.parquet",
+        "odds_history": "finance_politics_odds_history.parquet",
+        "event_stats": "finance_politics_event_stats.parquet",
+        "summary": "finance_politics_summary.parquet",
+    }
+    
+    data = {}
+    for key, filename in file_map.items():
+        file_path = polymarket_dir / filename
+        if file_path.exists():
+            try:
+                logging.info(f"Loading Polymarket data: {filename}")
+                df = pd.read_parquet(file_path)
+                data[key] = df
+                logging.info(f"  Loaded {len(df)} rows from {filename}")
+            except Exception as e:
+                logging.warning(f"Failed to load {filename}: {e}")
+        else:
+            logging.warning(f"Polymarket file not found: {file_path}")
+    
+    if data:
+        logging.info(f"Successfully loaded {len(data)} Polymarket data file(s)")
+    else:
+        logging.warning("No Polymarket data files were loaded")
+    
+    return data
+
+
 def _make_window_label(start: pd.Timestamp, end: pd.Timestamp) -> str:
     """Format rolling window label as 'YYYY-MM-DD → YYYY-MM-DD'."""
     return f"{start.strftime('%Y-%m-%d')} → {end.strftime('%Y-%m-%d')}"

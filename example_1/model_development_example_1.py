@@ -1,19 +1,25 @@
-"""Dynamic DCA weight computation using MVRV + 200-day MA strategy.
+"""Dynamic DCA weight computation using MVRV + 200-day MA + Polymarket strategy.
 
-This module computes daily investment weights for a Bitcoin DCA strategy
-based on two primary signals:
-1. MVRV Z-score: Buy more when undervalued (low MVRV)
-2. Price vs 200-day MA: Buy more when price is below long-term trend
-
-Enhanced MVRV utilization includes:
-- MVRV acceleration (momentum detection)
-- Asymmetric extreme response (aggressive at lows, conservative at highs)
-- Zone-based regime classification
-- Adaptive thresholds based on volatility
+This module extends the template model with Polymarket sentiment integration.
+It demonstrates how to:
+1. Import from template modules
+2. Add model-specific data loading functions
+3. Integrate external data sources (Polymarket) into the feature set
 """
+
+import logging
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+# Import base functionality from template
+from template.prelude_template import load_polymarket_data
+from template.model_development_template import (
+    _compute_stable_signal,
+    allocate_sequential_stable,
+    _clean_array,
+)
 
 # =============================================================================
 # Constants
@@ -56,14 +62,98 @@ FEATS = [
 
 
 # =============================================================================
+# Model-Specific Data Loading
+# =============================================================================
+
+
+def load_polymarket_btc_sentiment() -> pd.DataFrame:
+    """Load Polymarket BTC-related markets and compute daily sentiment.
+    
+    This is a model-specific function that processes raw Polymarket data
+    to extract BTC sentiment signals. It uses the general load_polymarket_data()
+    function from template/prelude_template.py.
+    
+    Aggregates BTC-related prediction markets by creation date to compute:
+    - daily_market_count: number of new BTC markets created each day
+    - daily_volume: total volume of BTC markets created each day
+    - polymarket_sentiment: normalized sentiment score [0, 1]
+    
+    Returns:
+        DataFrame indexed by date with sentiment features.
+        Returns empty DataFrame if Polymarket data not found.
+    """
+    # Load raw Polymarket data using the general function
+    polymarket_data = load_polymarket_data()
+    
+    if "markets" not in polymarket_data:
+        logging.warning(
+            "Polymarket markets data not found. "
+            "Polymarket sentiment will be neutral (0.0) for all dates."
+        )
+        return pd.DataFrame()
+    
+    markets_df = polymarket_data["markets"]
+    
+    # Filter to BTC-related markets
+    btc_markets = markets_df[
+        markets_df["question"].str.contains("Bitcoin|BTC|btc", case=False, na=False)
+    ].copy()
+    
+    logging.info(f"Found {len(btc_markets)} BTC-related markets in Polymarket data")
+    
+    if btc_markets.empty:
+        logging.warning("No BTC-related markets found in Polymarket data")
+        return pd.DataFrame()
+    
+    # Extract creation date (normalize to date only)
+    btc_markets["created_date"] = pd.to_datetime(btc_markets["created_at"]).dt.normalize()
+    
+    # Aggregate by creation date
+    daily_stats = btc_markets.groupby("created_date").agg(
+        daily_market_count=("market_id", "count"),
+        daily_volume=("volume", "sum")
+    ).reset_index()
+    
+    # Compute normalized sentiment score
+    # High market creation activity = high sentiment
+    # Use rolling 30-day percentile to normalize
+    daily_stats = daily_stats.set_index("created_date").sort_index()
+    
+    # Compute rolling percentiles (30-day window)
+    daily_stats["market_count_pct"] = (
+        daily_stats["daily_market_count"]
+        .rolling(30, min_periods=1)
+        .apply(lambda x: (x.iloc[-1] > x[:-1]).sum() / max(len(x) - 1, 1) if len(x) > 1 else 0.5)
+    )
+    
+    daily_stats["volume_pct"] = (
+        daily_stats["daily_volume"]
+        .rolling(30, min_periods=1)
+        .apply(lambda x: (x.iloc[-1] > x[:-1]).sum() / max(len(x) - 1, 1) if len(x) > 1 else 0.5)
+    )
+    
+    # Combine into single sentiment score (average of percentiles)
+    daily_stats["polymarket_sentiment"] = (
+        daily_stats["market_count_pct"] * 0.5 + daily_stats["volume_pct"] * 0.5
+    )
+    
+    # Fill NaN with neutral (0.5)
+    daily_stats["polymarket_sentiment"] = daily_stats["polymarket_sentiment"].fillna(0.5)
+    
+    logging.info(
+        f"Polymarket sentiment computed: {len(daily_stats)} days, "
+        f"{daily_stats.index.min().date()} to {daily_stats.index.max().date()}"
+    )
+    
+    return daily_stats[["polymarket_sentiment"]]
+
+
+# =============================================================================
 # Helper Functions
 # =============================================================================
 
 
-def softmax(x: np.ndarray) -> np.ndarray:
-    """Compute softmax probabilities."""
-    ex = np.exp(x - x.max())
-    return ex / ex.sum()
+# Note: softmax is not used in this model, removed to avoid duplication
 
 
 def zscore(series: pd.Series, window: int) -> pd.Series:
@@ -275,7 +365,6 @@ def precompute_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # Load Polymarket sentiment (if available)
     try:
-        from example_1.prelude_example_1 import load_polymarket_btc_sentiment
         polymarket_df = load_polymarket_btc_sentiment()
         if not polymarket_df.empty:
             # Merge with price index, fill missing dates with neutral (0.5)
@@ -284,8 +373,9 @@ def precompute_features(df: pd.DataFrame) -> pd.DataFrame:
             )
         else:
             polymarket_sentiment = pd.Series(0.5, index=price.index)
-    except (ImportError, FileNotFoundError):
+    except (ImportError, FileNotFoundError, Exception) as e:
         # If Polymarket data not available, use neutral sentiment
+        logging.warning(f"Polymarket sentiment not available: {e}")
         polymarket_sentiment = pd.Series(0.5, index=price.index)
 
     # Build and lag features
@@ -338,77 +428,7 @@ def precompute_features(df: pd.DataFrame) -> pd.DataFrame:
 # =============================================================================
 
 
-def _compute_stable_signal(raw: np.ndarray) -> np.ndarray:
-    """Compute stable signal weights using cumulative mean normalization.
-
-    signal[i] = raw[i] / mean(raw[0:i+1])
-
-    This ensures weights only depend on past data.
-    """
-    n = len(raw)
-    if n == 0:
-        return np.array([])
-    if n == 1:
-        return np.array([1.0])
-
-    cumsum = np.cumsum(raw)
-    running_mean = cumsum / np.arange(1, n + 1)
-
-    with np.errstate(divide="ignore", invalid="ignore"):
-        signal = raw / running_mean
-    return np.where(np.isfinite(signal), signal, 1.0)
-
-
-def allocate_sequential_stable(
-    raw: np.ndarray,
-    n_past: int,
-    locked_weights: np.ndarray | None = None,
-) -> np.ndarray:
-    """Allocate weights with lock-on-compute stability.
-
-    Past weights are locked and never change. Future days absorb remainder.
-
-    Args:
-        raw: Raw weight values for all dates
-        n_past: Number of past/current dates (locked)
-        locked_weights: Optional pre-computed locked weights from database
-
-    Returns:
-        Weights summing to 1.0
-    """
-    n = len(raw)
-    if n == 0:
-        return np.array([])
-    if n_past <= 0:
-        return np.full(n, 1.0 / n)
-
-    n_past = min(n_past, n)
-    w = np.zeros(n)
-    base_weight = 1.0 / n
-
-    # Compute or use locked weights for past days
-    if locked_weights is not None and len(locked_weights) >= n_past:
-        w[:n_past] = locked_weights[:n_past]
-    else:
-        for i in range(n_past):
-            signal = _compute_stable_signal(raw[: i + 1])[-1]
-            w[i] = signal * base_weight
-
-    # Scale past weights if they exceed budget
-    past_sum = w[:n_past].sum()
-    target_budget = n_past / n
-    if past_sum > target_budget + 1e-10:
-        w[:n_past] *= target_budget / past_sum
-
-    # Future days (except last): uniform
-    n_future = n - n_past
-    if n_future > 1:
-        w[n_past : n - 1] = base_weight
-
-    # Last day absorbs remainder
-    w[n - 1] = max(1.0 - w[: n - 1].sum(), 0)
-
-    return w
+# Note: _compute_stable_signal and allocate_sequential_stable are imported from template.model_development_template
 
 
 # =============================================================================
@@ -644,9 +664,7 @@ def compute_dynamic_multiplier(
 # =============================================================================
 
 
-def _clean_array(arr: np.ndarray) -> np.ndarray:
-    """Replace NaN/Inf with 0."""
-    return np.where(np.isfinite(arr), arr, 0)
+# Note: _clean_array is imported from template.model_development_template
 
 
 def compute_weights_fast(

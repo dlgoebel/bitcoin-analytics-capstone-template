@@ -381,25 +381,36 @@ def export_metrics_json(
     logging.info(f"✓ Saved: {output_path}")
 
 
-def main():
-    global _FEATURES_DF
 
-    logging.info("Starting Bitcoin DCA Strategy Analysis")
-    btc_df = load_data()
+def run_full_analysis(
+    btc_df: pd.DataFrame,
+    features_df: pd.DataFrame,
+    compute_weights_fn,
+    output_dir: Path | str,
+    strategy_label: str = "Dynamic DCA",
+):
+    """Run full backtest analysis pipeline and generate all artifacts.
 
-    logging.info("Precomputing features...")
-    _FEATURES_DF = precompute_features(btc_df)
+    Args:
+        btc_df: DataFrame with PriceUSD_coinmetrics
+        features_df: DataFrame with precomputed features
+        compute_weights_fn: Function or callable that accepts (df_window, current_date)
+        output_dir: Directory where charts and metrics.json will be saved
+        strategy_label: Label for the strategy in charts
+    """
+    output_dir = Path(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
 
-    logging.info("Running SPD backtest...")
+    logging.info(f"Running SPD backtest for '{strategy_label}'...")
     df_spd, exp_decay_percentile = backtest_dynamic_dca(
         btc_df,
-        compute_weights_modal,
-        features_df=_FEATURES_DF,
-        strategy_label="Dynamic DCA",
+        compute_weights_fn,
+        features_df=features_df,
+        strategy_label=strategy_label,
     )
 
     logging.info("Running strategy validation...")
-    check_strategy_submission_ready(btc_df, compute_weights_modal)
+    check_strategy_submission_ready(btc_df, compute_weights_fn)
 
     # Calculate metrics
     win_rate = (
@@ -451,11 +462,6 @@ def main():
         f"median={metrics['median_ratio']:.2f}"
     )
 
-    # Generate visualizations and export metrics
-    base_dir = Path(__file__).parent.parent
-    output_dir = base_dir / "output"
-    os.makedirs(output_dir, exist_ok=True)
-
     logging.info("Generating visualizations...")
     create_performance_comparison_chart(df_spd, output_dir)
     create_excess_percentile_distribution(df_spd, output_dir)
@@ -465,6 +471,27 @@ def main():
     export_metrics_json(df_spd, metrics, output_dir)
 
     logging.info(f"All outputs saved to '{output_dir}/' directory")
+
+
+def main():
+    global _FEATURES_DF
+
+    logging.info("Starting Bitcoin DCA Strategy Analysis")
+    btc_df = load_data()
+
+    logging.info("Precomputing features...")
+    _FEATURES_DF = precompute_features(btc_df)
+
+    base_dir = Path(__file__).parent.parent
+    output_dir = base_dir / "output"
+
+    run_full_analysis(
+        btc_df=btc_df,
+        features_df=_FEATURES_DF,
+        compute_weights_fn=compute_weights_modal,
+        output_dir=output_dir,
+        strategy_label="Dynamic DCA",
+    )
 
 
 if __name__ == "__main__":

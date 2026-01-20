@@ -79,13 +79,7 @@ _FEATURES_DF = precompute_features(btc_df)
 
 Features include:
 
-- `price_vs_ma`: Distance from 200-day moving average
-- `mvrv_zscore`: MVRV Z-score (365-day window)
-- `mvrv_gradient`: Trend direction (30-day EMA)
-- `mvrv_percentile`: 4-year rolling percentile
-- `mvrv_acceleration`: Momentum indicator
-- `mvrv_volatility`: Uncertainty measure
-- `signal_confidence`: Signal agreement score
+- `price_vs_ma`: Distance from 200-day moving average (lagged 1 day)
 
 ### Rolling Window Backtest
 
@@ -244,21 +238,26 @@ assert win_rate >= 0.5
 
 ## Usage
 
-Run the backtest from the command line:
+The backtest can be run for either the baseline template or specific examples.
 
+### 1. Run Baseline Template Backtest
 ```bash
-cd /path/to/bitcoin_modal
-source venv/bin/activate
 python -m template.backtest_template
 ```
+*Outputs results to `output/` directory.*
 
-The script will:
+### 2. Run Example 1 (Polymarket) Backtest
+```bash
+python -m example_1.run_backtest
+```
+*Outputs results to `example_1/output/` directory.*
 
-1. Load BTC data with today's live price
-2. Precompute all model features
-3. Run SPD backtest across all rolling windows
-4. Validate weights and check for forward-leakage
-5. Generate visualizations and export metrics
+The runner scripts:
+1. Load historical BTC data.
+2. Precompute model-specific features.
+3. Execute the rolling window backtest.
+4. Validate weight stability and look-ahead bias.
+5. Generate SVG visualizations and `metrics.json`.
 
 ## Key Functions
 

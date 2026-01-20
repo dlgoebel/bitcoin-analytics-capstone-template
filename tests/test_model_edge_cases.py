@@ -3,7 +3,6 @@
 Covers:
 1. allocate_sequential_stable edge cases (n_past behavior)
 2. Extreme input values for dynamic multiplier
-3. Boundary checks for adaptive modifiers
 """
 
 import numpy as np
@@ -13,8 +12,6 @@ import pytest
 from template.model_development_template import (
     allocate_sequential_stable,
     compute_dynamic_multiplier,
-    compute_adaptive_trend_modifier,
-    compute_asymmetric_extreme_boost
 )
 
 # -----------------------------------------------------------------------------
@@ -91,41 +88,32 @@ def test_allocate_sequential_stable_locked_weights_mismatch():
 
 def test_compute_dynamic_multiplier_extreme_values():
     """Test handling of extreme inputs (inf, nan handling wrapped in array)."""
-    # Inputs
-    price_vs_ma = np.array([0.0])
-    mvrv_zscore = np.array([1000.0]) # Extreme value
-    mvrv_gradient = np.array([0.0])
+    # Inputs - simplified to only price_vs_ma
+    price_vs_ma = np.array([-1.0, -0.5, 0.0, 0.5, 1.0, 10.0, -10.0])  # Including extreme values
     
     # Should not crash and clip result
-    multiplier = compute_dynamic_multiplier(
-        price_vs_ma, mvrv_zscore, mvrv_gradient
-    )
+    multiplier = compute_dynamic_multiplier(price_vs_ma)
     
     assert np.all(np.isfinite(multiplier))
-    assert multiplier[0] > 0 # Multipliers must be positive
+    assert np.all(multiplier > 0)  # Multipliers must be positive
+    
+    # Below MA (negative price_vs_ma) should give higher multipliers
+    assert multiplier[0] > multiplier[2]  # -1.0 > 0.0
+    # Above MA (positive price_vs_ma) should give lower multipliers
+    assert multiplier[4] < multiplier[2]  # 1.0 < 0.0
 
 
-def test_compute_asymmetric_extreme_boost_bounds():
-    """Test that boost logic handles extremely deep negative values correctly."""
-    z_scores = np.array([-10.0, -5.0, 0.0, 5.0, 10.0])
+def test_compute_dynamic_multiplier_clipping():
+    """Test that extreme values are properly clipped."""
+    # Test with values beyond [-1, 1] range
+    price_vs_ma = np.array([-5.0, -1.0, 0.0, 1.0, 5.0])
     
-    boost = compute_asymmetric_extreme_boost(z_scores)
+    multiplier = compute_dynamic_multiplier(price_vs_ma)
     
-    assert np.all(np.isfinite(boost))
+    # All should be finite and positive
+    assert np.all(np.isfinite(multiplier))
+    assert np.all(multiplier > 0)
     
-    # -10 should have massive boost
-    assert boost[0] > boost[1] 
-    # +10 should have massive penalty (negative boost)
-    assert boost[4] < boost[3]
-
-
-def test_compute_adaptive_trend_modifier_bounds():
-    """Test limits of adaptive trend modifier."""
-    mvrv_gradient = np.array([-10.0, -1.0, 0.0, 1.0, 10.0])
-    mvrv_zscore = np.array([0.0] * 5) # Neutral z-score
-    
-    modifier = compute_adaptive_trend_modifier(mvrv_gradient, mvrv_zscore)
-    
-    # Should be clipped to [0.3, 1.5]
-    assert np.all(modifier >= 0.3)
-    assert np.all(modifier <= 1.5)
+    # Should handle extreme values gracefully (clipped internally)
+    assert multiplier[0] > 0  # Very negative should still give positive multiplier
+    assert multiplier[4] > 0   # Very positive should still give positive multiplier
