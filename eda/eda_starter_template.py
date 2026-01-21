@@ -30,17 +30,29 @@ def load_polymarket_data(datadir):
     print(f"Loading Polymarket data from {datadir}...")
     markets_path = os.path.join(datadir, 'finance_politics_markets.parquet')
     odds_path = os.path.join(datadir, 'finance_politics_odds_history.parquet')
+    summary_path = os.path.join(datadir, 'finance_politics_summary.parquet')
     
+    data = {}
     try:
-        markets_df = pd.read_parquet(markets_path)
-        # Convert date columns
-        if 'created_at' in markets_df.columns:
-            markets_df['created_at'] = pd.to_datetime(markets_df['created_at'])
-        if 'end_date' in markets_df.columns:
-            markets_df['end_date'] = pd.to_datetime(markets_df['end_date'])
+        if os.path.exists(markets_path):
+            markets_df = pd.read_parquet(markets_path)
+            # Convert date columns
+            if 'created_at' in markets_df.columns:
+                markets_df['created_at'] = pd.to_datetime(markets_df['created_at'])
+            if 'end_date' in markets_df.columns:
+                markets_df['end_date'] = pd.to_datetime(markets_df['end_date'])
+            data['markets'] = markets_df
+            print(f"Loaded {len(markets_df)} markets.")
             
-        print(f"Loaded {len(markets_df)} markets.")
-        return markets_df
+        if os.path.exists(odds_path):
+            data['odds'] = pd.read_parquet(odds_path)
+            print(f"Loaded {len(data['odds'])} odds history records.")
+            
+        if os.path.exists(summary_path):
+            data['summary'] = pd.read_parquet(summary_path)
+            print(f"Loaded {len(data['summary'])} summary records.")
+            
+        return data if data else None
     except Exception as e:
         print(f"Error loading Polymarket data: {e}")
         return None
@@ -90,29 +102,41 @@ def analyze_btc_metrics(df):
     print("Saved btc_correlation_matrix.png")
     plt.close()
 
-def analyze_polymarket_summary(df):
+def analyze_polymarket_summary(data):
     print("\n--- Polymarket Data Summary ---")
-    print(f"Total Markets: {len(df)}")
-    if 'active' in df.columns:
-        print(f"Active Markets: {df['active'].sum()}")
-        print(f"Closed Markets: {len(df) - df['active'].sum()}")
     
-    if 'volume' in df.columns:
-        print(f"Total Volume: {df['volume'].sum():,.2f}")
-        print(f"Average Volume per Market: {df['volume'].mean():,.2f}")
+    markets_df = data.get('markets')
+    if markets_df is not None:
+        print(f"Total Markets: {len(markets_df)}")
+        if 'active' in markets_df.columns:
+            print(f"Active Markets: {markets_df['active'].sum()}")
+            print(f"Closed Markets: {len(markets_df) - markets_df['active'].sum()}")
+        
+        if 'volume' in markets_df.columns:
+            print(f"Total Volume: {markets_df['volume'].sum():,.2f}")
+            print(f"Average Volume per Market: {markets_df['volume'].mean():,.2f}")
+
+    odds_df = data.get('odds')
+    if odds_df is not None:
+        print(f"Total Odds History Records: {len(odds_df):,}")
+        
+    summary_df = data.get('summary')
+    if summary_df is not None and 'trade_count' in summary_df.columns:
+        print(f"Total Trades: {summary_df['trade_count'].sum():,}")
 
 # --- Main Execution ---
 def main():
     btc_df = load_bitcoin_data(COINMETRICS_PATH)
-    poly_markets_df = load_polymarket_data(POLYMARKET_DIR)
+    poly_data = load_polymarket_data(POLYMARKET_DIR)
 
     if btc_df is not None:
         analyze_btc_metrics(btc_df)
         plot_btc_price(btc_df)
     
-    if poly_markets_df is not None:
-        analyze_polymarket_summary(poly_markets_df)
-        plot_polymarket_volume(poly_markets_df)
+    if poly_data is not None:
+        analyze_polymarket_summary(poly_data)
+        if 'markets' in poly_data:
+            plot_polymarket_volume(poly_data['markets'])
 
     print("\nEDA Layout Complete. Check the 'plots' directory for visualizations.")
 
