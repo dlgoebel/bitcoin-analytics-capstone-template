@@ -6,9 +6,9 @@ See [stackingsats.org](https://www.stackingsats.org/) for more information.
 
 ---
 
-## The Mission: Improving Institutional Bitcoin Accumulation
+## The Mission: Exploring Institutional Bitcoin Accumulation
 
-As Bitcoin matures as an institutional asset, standard Dollar Cost Averaging (DCA) can be suboptimal. Our goal is to design **data-driven, long-only** accumulation strategies that maintain DCA’s systematic discipline while **improving acquisition efficiency** within fixed budgets and time horizons.
+As Bitcoin matures as an institutional asset, standard Dollar Cost Averaging (DCA) is a strong baseline, but there may be room for optimization. This project facilitates the design of **data-driven, long-only** accumulation strategies. The aim is to explore methods that maintain DCA’s systematic discipline while potentially **improving acquisition efficiency** within fixed budgets and time horizons.
 
 ### Latest Tournament
 Trilemma Foundation hosts tournaments to find the most efficient accumulation models.
@@ -76,18 +76,18 @@ python data/download_data.py
 
 ---
 
-## Building Your Model
+## Model Development Guidelines
 
-The framework uses a **Template Baseline** located in `template/`. This model uses a simple 200-day Moving Average filter: buy more when price is below the 200-day MA, buy less when above.
+The framework includes a **Template Baseline** in `template/`. This serves as a starting point, currently implementing a simple 200-day Moving Average filter (accumulating more when price is below the MA).
 
-### The Challenge: Prediction Market Integration
+### Exploration Path: Prediction Market Integration
 
-The primary objective is to evolve this baseline into a market-aware strategy by leveraging **Polymarket data**.
+A core opportunity lies in evolving this baseline into a market-aware strategy, perhaps by leveraging **Polymarket data**.
 
-**Potential Signal Leads:**
-* **Election Probabilities**: Does political volatility lead BTC price discovery?
-* **Economic Indicators**: Do prediction markets for Fed rate cuts lead BTC price movements?
-* **Retail Sentiment**: Using specific "Polymarket Crypto" markets as indicators for retail exuberance.
+**Illustrative Examples:**
+*   **Election Probabilities**: You might investigate if political event probabilities correlate with BTC volatility.
+*   **Economic Indicators**: Consider checking if prediction markets for Fed rate cuts act as leading indicators.
+*   **Retail Sentiment**: Specific "Polymarket Crypto" markets could potentially serve as proxies for retail sentiment or exuberance.
 
 ### Running Backtests
 
@@ -103,13 +103,13 @@ python -m example_1.run_backtest
 
 ---
 
-## Evaluation Metrics
+## Key Performance Indicators
 
-Strategies are evaluated on three primary pillars (automated via the backtest engine):
+When evaluating strategies, you might consider the following metrics (which are calculated by the automated backtest engine):
 
-1.  **Win Rate**: The percentage of 1-year windows where the strategy outperforms uniform DCA.
-2.  **SPD (Sats Per Dollar)**: The overall efficiency of satoshi accumulation compared to the baseline.
-3.  **Model Score**: A composite metric weighing win rate against reward-to-risk percentile.
+1.  **Win Rate**: Useful for understanding consistency—how often does the strategy outperform a standard DCA over 1-year windows?
+2.  **SPD (Sats Per Dollar)**: A measure of raw efficiency—are you acquiring more bitcoin for the same capital?
+3.  **Model Score**: A composite metric that balances performance (Win Rate) with risk-adjusted returns, offering a holistic view of strategy health.
 
 ## Licensing
 
