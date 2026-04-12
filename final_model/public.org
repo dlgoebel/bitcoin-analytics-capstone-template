@@ -1,0 +1,64 @@
+#+TITLE: Systematic Bitcoin Accumulation: Outperforming DCA via Regime-Conditional On-Chain Valuation
+#+AUTHOR: GT-MSA-Spring-2026-Team-25
+#+DATE: 2026-04-12
+#+OPTIONS: toc:nil num:nil
+
+* Introduction: The Naive Baseline Problem
+
+In quantitative finance, the ultimate naive benchmark for asset accumulation is Dollar Cost Averaging (DCA). It is a zero-information strategy: it assumes the market is perfectly efficient and that current price contains all available information. 
+
+However, Bitcoin exhibits well-documented, highly autocorrelated market regimes and extreme cyclicality. Furthermore, unlike traditional equities, Bitcoin possesses a transparent, immutable ledger that allows us to calculate the exact cost basis of all market participants at any given time. 
+
+The objective of this research was to determine if we could systematically outperform a uniform daily DCA strategy using on-chain valuation metrics and momentum, without falling into the trap of overfitting to Bitcoin's limited historical sample size (only ~4 major macroeconomic cycles).
+
+* Signal Selection: Empirical Rigour and the "Null" Result
+
+Our Exploratory Data Analysis (EDA) evaluated over 20 on-chain and prediction market features using stationarity testing, Granger causality, and mutual information analysis. 
+
+** The Dominant Signal: MVRV
+The standout feature was the Market Value to Realised Value (MVRV) ratio. Realised Value calculates the market cap based on the price at which each UTXO last moved (the aggregate market cost basis). MVRV is simply the ratio of current Market Cap to Realised Cap. 
+
+Our EDA confirmed that changes in MVRV Granger-cause Bitcoin price changes (p = 2.16e-25) and exhibit wavelet coherence across all timescales from 1 week to 4 years. We utilised a 365-day rolling Z-score of MVRV as our primary valuation signal.
+
+** The Null Result: Prediction Markets (Polymarket)
+A core hypothesis of this project was that forward-looking prediction market data—specifically Polymarket odds regarding Federal Reserve interest rate decisions—could provide an edge in sizing positions during volatile periods. 
+
+Empirically, this hypothesis failed. While our EDA found a weak correlation between Fed uncertainty and forward 30-day BTC volatility, integrating this into the dynamic allocation model yielded zero statistically significant improvement over a purely on-chain model. Prediction market data, in this context, proved to be coincident rather than predictive. In the interest of model parsimony, we discarded it. Proving a negative is a valid and necessary part of quantitative research.
+
+* Model Architecture: Regime-Conditional Blending
+
+The core challenge in dynamic accumulation is that signals conflict depending on the market regime. During a crash, valuation metrics scream "Buy" while momentum metrics scream "Sell". 
+
+To resolve this, we implemented a *Regime-Conditional Blending* architecture, using the price relative to the 200-day moving average (DMA) as our regime filter.
+
+1. *Bear Market Regime (Price < 200 DMA):* Value is paramount. We heavily weight the MVRV Z-score and apply a non-linear boost if the asset is deeply undervalued (Z < -1.0) *and* the MVRV gradient turns positive (confirming a potential bottom). Short-term negative momentum is largely ignored to avoid missing the absolute lows.
+2. *Bull Market Regime (Price > 200 DMA):* Trend is respected. We weight 30-day momentum more heavily to ride the breakout, but apply a strict penalty if MVRV indicates severe overvaluation.
+
+** The Log-Space Additivity Insight
+During development, we discovered a critical mathematical trap. Initially, we applied our regime modifier multiplicatively: ~Final_Weight = Base_Signal * Regime_Multiplier~. 
+
+However, at the absolute peak of a bull market, the Base Signal is deeply negative (a strong "do not buy" signal). Multiplying a negative signal by a small fractional Regime Multiplier accidentally shrank the signal back towards zero. Because we exponentiate the final output to ensure strictly positive weights, ~exp(0)~ resulted in a ~1.0x~ multiplier—meaning the model was buying at normal DCA rates right at the market top!
+
+We corrected this by applying the regime shift *additively in log-space*. Because ~exp(A + B) = exp(A) * exp(B)~, adding the penalty in log-space correctly acts as a true multiplier in real-space, preserving the direction and magnitude of the "do not buy" signal.
+
+* Empirical Results
+
+The strategy was backtested over rolling 1-year windows from 2018 to 2025, strictly enforcing a fixed budget (weights must sum to 1.0 over the window) and preventing look-ahead bias.
+
+** Performance Metrics
+- *Win Rate vs Uniform DCA:* 64.02% (Strategy outperformed DCA in 1,637 out of 2,557 rolling windows).
+- *Median Relative Improvement:* +20.18% more Bitcoin accumulated per dollar spent compared to the naive baseline.
+- *Mean Excess Sats-Per-Dollar (SPD):* +5.08%.
+
+** Visualising the Asymmetry
+The success of the model stems from its extreme asymmetry. On a typical day, the model acts defensively, deploying only ~17% of the standard daily DCA budget. It saves this capital for structural market bottoms.
+
+[[file:output/weight_comparison_2021_2023.png]]
+
+As seen in the chart above (covering the 2021 bull peak through the 2022 bear market), the model successfully suppresses buying during the 2021 all-time highs. Conversely, during the Luna (May 2022) and FTX (Nov 2022) capitulation events, the alignment of deep MVRV value, positive gradient, and sub-200 DMA regime triggers massive capital deployment—spiking to nearly 95x the normal daily allocation.
+
+* Conclusion
+
+Systematic outperformance of Dollar Cost Averaging in Bitcoin is achievable without complex machine learning or overfitting. By combining a robust on-chain valuation metric (MVRV) with a simple trend filter (200 DMA) and applying mathematically sound, regime-conditional logic in log-space, we can drastically improve accumulation efficiency. 
+
+Furthermore, the exclusion of Polymarket data serves as a reminder that in quantitative modelling, more data does not automatically equate to more alpha. Parsimony and empirical rigour remain the most reliable tools for strategy development.
