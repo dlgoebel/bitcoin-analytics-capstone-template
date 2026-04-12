@@ -8,6 +8,12 @@ from template.model_development_template import (
 )
 
 # =============================================================================
+# Feature Flags for Systematic Testing
+# =============================================================================
+USE_ASYMMETRIC_MOMENTUM = True  # Toggle Idea 2
+USE_POLYMARKET_FED = False      # Toggle Idea 1 (Requires EDA data loading logic)
+
+# =============================================================================
 # Constants
 # =============================================================================
 
@@ -26,8 +32,18 @@ MVRV_GRADIENT_WINDOW = 30
 # Feature Engineering
 # =============================================================================
 
+def load_fed_uncertainty(target_index: pd.DatetimeIndex) -> pd.Series:
+    """
+    Load Polymarket Fed uncertainty signal.
+    
+    TODO: Replace this placeholder with the exact data loading logic from your EDA.
+    The signal should ideally be scaled between 0.0 (certain) and 1.0 (highly uncertain).
+    """
+    # Returning a neutral 0.5 placeholder for now
+    return pd.Series(0.5, index=target_index)
+
 def precompute_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Compute MVRV, Momentum, Volatility, and Regime features for weight calculation.
+    """Compute MVRV, Momentum, Volatility, Regime, and Macro features.
 
     Features (all lagged 1 day to prevent look-ahead bias):
     - mvrv_zscore: 365-day rolling Z-score of MVRV.
@@ -36,6 +52,7 @@ def precompute_features(df: pd.DataFrame) -> pd.DataFrame:
     - volatility_pct: 30-day rolling volatility, ranked as a percentile [0, 1].
     - price_vs_ma: Price relative to 200-day moving average.
     - mvrv_gradient: 30-day change in MVRV Z-score.
+    - fed_uncertainty: Polymarket macro uncertainty score.
 
     Args:
         df: DataFrame with price and MVRV columns
@@ -79,6 +96,9 @@ def precompute_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # 5. MVRV Gradient (Trajectory Signal)
     mvrv_gradient = mvrv_zscore.diff(MVRV_GRADIENT_WINDOW).fillna(0).clip(-3, 3)
+    
+    # 6. Polymarket Fed Uncertainty
+    fed_uncertainty = load_fed_uncertainty(price.index)
 
     # Build DataFrame
     features = pd.DataFrame({
@@ -88,13 +108,14 @@ def precompute_features(df: pd.DataFrame) -> pd.DataFrame:
         "roi_1yr": roi_1yr,
         "volatility_pct": volatility_pct,
         "price_vs_ma": price_vs_ma,
-        "mvrv_gradient": mvrv_gradient
+        "mvrv_gradient": mvrv_gradient,
+        "fed_uncertainty": fed_uncertainty
     }, index=price.index)
 
     # Lag signals by 1 day to prevent look-ahead bias
     signal_cols = [
         "mvrv_zscore", "roi_30d", "roi_1yr", 
-        "volatility_pct", "price_vs_ma", "mvrv_gradient"
+        "volatility_pct", "price_vs_ma", "mvrv_gradient", "fed_uncertainty"
     ]
     features[signal_cols] = features[signal_cols].shift(1).fillna(0)
 
@@ -110,7 +131,8 @@ def compute_dynamic_multiplier(
     roi_1yr: np.ndarray,
     volatility_pct: np.ndarray,
     price_vs_ma: np.ndarray,
-    mvrv_gradient: np.ndarray
+    mvrv_gradient: np.ndarray,
+    fed_uncertainty: np.ndarray
 ) -> np.ndarray:
     """Compute weight multiplier using additive log-space shifts.
 
@@ -121,6 +143,7 @@ def compute_dynamic_multiplier(
         volatility_pct: Volatility percentile [0, 1]
         price_vs_ma: Price relative to 200 DMA
         mvrv_gradient: 30-day change in MVRV Z-score
+        fed_uncertainty: Polymarket Fed uncertainty [0, 1]
 
     Returns:
         Multipliers centred around 1.0
@@ -140,15 +163,22 @@ def compute_dynamic_multiplier(
     
     value_score = value_score + value_boost + confirmation_boost
 
-    # 2. Momentum Score
-    mom_score = roi_30d * 2.0
+    # 2. Momentum Score (Regime-Asymmetric Toggle)
+    if USE_ASYMMETRIC_MOMENTUM:
+        # Bull market: reward momentum (trend following)
+        # Bear market: discount momentum (ignore dead cat bounces, focus on value)
+        mom_score = np.where(
+            price_vs_ma > 0,
+            roi_30d * 2.5,
+            roi_30d * 0.5
+        )
+    else:
+        mom_score = roi_30d * 2.0
 
     # 3. Combine Base Signals
     base_signal = (value_score * 0.8) + (mom_score * 0.2)
 
     # 4. Regime Shift (Additive in log-space = Multiplicative in real-space)
-    # This fixes the bug where multiplying a negative signal by a small fraction
-    # accidentally shrank the "do not buy" signal back towards 1.0x.
     regime_shift = np.where(
         price_vs_ma < 0,
         np.abs(price_vs_ma) * 2.0,   # Shift up in bear markets
@@ -157,17 +187,25 @@ def compute_dynamic_multiplier(
 
     combined = base_signal + regime_shift
 
-    # 5. Volatility Dampening
-    # Extreme volatility (top 15%) reduces allocation
-    dampener = np.where(
-        volatility_pct > 0.85,
-        1.0 - 0.5 * ((volatility_pct - 0.85) / 0.15),
-        1.0
-    )
+    # 5. Volatility Dampening (Polymarket Toggle)
+    if USE_POLYMARKET_FED:
+        # EDA Finding #5: High Fed uncertainty predicts lower forward volatility.
+        # If uncertainty is high (>0.5), we increase the threshold before dampening kicks in.
+        dampener_threshold = 0.85 + (fed_uncertainty - 0.5) * 0.1
+        dampener = np.where(
+            volatility_pct > dampener_threshold,
+            1.0 - 0.5 * ((volatility_pct - dampener_threshold) / 0.15),
+            1.0
+        )
+    else:
+        # Standard dampener
+        dampener = np.where(
+            volatility_pct > 0.85,
+            1.0 - 0.5 * ((volatility_pct - 0.85) / 0.15),
+            1.0
+        )
     
     # Scale and clip
-    # Clip at 4.5 allows a max multiplier of exp(4.5) ≈ 90x for absolute bottoms
-    # Clip at -4.0 allows a min multiplier of exp(-4.0) ≈ 0.018x for absolute tops
     adjustment = np.clip(combined * DYNAMIC_STRENGTH * dampener, -4.0, 4.5)
     multiplier = np.exp(adjustment)
     
@@ -199,10 +237,11 @@ def compute_weights_fast(
     volatility_pct = _clean_array(df["volatility_pct"].values)
     price_vs_ma = _clean_array(df["price_vs_ma"].values)
     mvrv_gradient = _clean_array(df["mvrv_gradient"].values)
+    fed_uncertainty = _clean_array(df["fed_uncertainty"].values)
 
     # Compute dynamic weights
     dyn = compute_dynamic_multiplier(
-        mvrv_zscore, roi_30d, roi_1yr, volatility_pct, price_vs_ma, mvrv_gradient
+        mvrv_zscore, roi_30d, roi_1yr, volatility_pct, price_vs_ma, mvrv_gradient, fed_uncertainty
     )
     raw = base * dyn
 
@@ -236,6 +275,8 @@ def compute_window_weights(
             placeholder["price_vs_ma"] = 0.0
         if "mvrv_gradient" in placeholder.columns:
             placeholder["mvrv_gradient"] = 0.0
+        if "fed_uncertainty" in placeholder.columns:
+            placeholder["fed_uncertainty"] = 0.5
             
         features_df = pd.concat([features_df, placeholder]).sort_index()
 
