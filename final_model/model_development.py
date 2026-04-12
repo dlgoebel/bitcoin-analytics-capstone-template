@@ -16,7 +16,7 @@ MVRV_COL = "CapMVRVCur"
 
 # Strategy parameters
 MIN_W = 1e-6
-DYNAMIC_STRENGTH = 2.0  # Softened from 3.5 to spread capital across the bear market
+DYNAMIC_STRENGTH = 2.5  # Calibrated for additive log-space shifts
 MVRV_ROLLING_WINDOW = 365
 VOLATILITY_WINDOW = 30
 MA_WINDOW = 200
@@ -112,7 +112,7 @@ def compute_dynamic_multiplier(
     price_vs_ma: np.ndarray,
     mvrv_gradient: np.ndarray
 ) -> np.ndarray:
-    """Compute weight multiplier using Regime-Conditional Blending.
+    """Compute weight multiplier using additive log-space shifts.
 
     Args:
         mvrv_zscore: MVRV Z-score in [-4, 4]
@@ -131,49 +131,44 @@ def compute_dynamic_multiplier(
     # Non-linear boost for deep value + improving trajectory
     deep_value = mvrv_zscore < -1.0
     improving = mvrv_gradient > 0
-    value_boost = np.where(deep_value & improving, np.abs(mvrv_zscore)**1.5, 0)
-    value_score = value_score + value_boost
+    
+    # Add extra weight when deeply undervalued
+    value_boost = np.where(deep_value, np.abs(mvrv_zscore) - 1.0, 0)
+    
+    # Add confirmation weight when undervalued AND starting to rise
+    confirmation_boost = np.where(deep_value & improving, value_boost * 1.0, 0)
+    
+    value_score = value_score + value_boost + confirmation_boost
 
     # 2. Momentum Score
-    mom_score = (roi_30d * 2.0) + (roi_1yr * 0.5)
+    mom_score = roi_30d * 2.0
 
-    # 3. Regime-Conditional Blending
-    is_bear = price_vs_ma < 0
-    
-    # In bear markets, value is the primary driver (ignore negative momentum).
-    # In bull markets, momentum is more important to ride the trend.
-    combined = np.where(
-        is_bear,
-        (value_score * 0.8) + (mom_score * 0.2),
-        (value_score * 0.4) + (mom_score * 0.6)
+    # 3. Combine Base Signals
+    base_signal = (value_score * 0.8) + (mom_score * 0.2)
+
+    # 4. Regime Shift (Additive in log-space = Multiplicative in real-space)
+    # This fixes the bug where multiplying a negative signal by a small fraction
+    # accidentally shrank the "do not buy" signal back towards 1.0x.
+    regime_shift = np.where(
+        price_vs_ma < 0,
+        np.abs(price_vs_ma) * 2.0,   # Shift up in bear markets
+        -price_vs_ma * 3.0           # Shift down heavily in bull markets
     )
 
-    # 4. Overvaluation Penalty
-    # Regardless of momentum, if MVRV is dangerously high, suppress buying.
-    overvalued_penalty = np.where(mvrv_zscore > 1.5, (mvrv_zscore - 1.5) * 2.0, 0)
-    combined = combined - overvalued_penalty
+    combined = base_signal + regime_shift
 
-    # 5. Regime Multiplier (Overall scaling)
-    # Boost allocations in bear markets, gently suppress in bull markets
-    regime_multiplier = np.where(
-        is_bear,
-        1.0 + np.abs(price_vs_ma) * 2.0,
-        np.maximum(0.2, 1.0 - price_vs_ma * 0.75)
-    )
-    
-    combined = combined * regime_multiplier
-
-    # 6. Volatility Dampening
-    # Extreme volatility (top 15%) reduces allocation to avoid catching falling knives blindly
+    # 5. Volatility Dampening
+    # Extreme volatility (top 15%) reduces allocation
     dampener = np.where(
         volatility_pct > 0.85,
         1.0 - 0.5 * ((volatility_pct - 0.85) / 0.15),
         1.0
     )
-    combined = combined * dampener
-
-    # Scale and clip to prevent extreme allocations
-    adjustment = np.clip(combined * DYNAMIC_STRENGTH, -3, 5)
+    
+    # Scale and clip
+    # Clip at 4.5 allows a max multiplier of exp(4.5) ≈ 90x for absolute bottoms
+    # Clip at -4.0 allows a min multiplier of exp(-4.0) ≈ 0.018x for absolute tops
+    adjustment = np.clip(combined * DYNAMIC_STRENGTH * dampener, -4.0, 4.5)
     multiplier = np.exp(adjustment)
     
     return np.where(np.isfinite(multiplier), multiplier, 1.0)
