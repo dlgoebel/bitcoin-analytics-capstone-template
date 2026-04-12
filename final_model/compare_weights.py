@@ -79,7 +79,7 @@ def main():
     ax2.plot(mult_ex1.index, mult_ex1.values, color='#3b82f6', linewidth=1.5, alpha=0.8, 
              label='Example 1 (Includes 200 DMA & MVRV Gradient)')
     ax2.plot(mult_fm.index, mult_fm.values, color='#10b981', linewidth=1.5, alpha=0.8, 
-             label='Current Final Model (MVRV Z-Score + Momentum)')
+             label='Final Model (MVRV + Momentum + 200 DMA + Gradient)')
     
     ax2.axhline(1.0, color='gray', linestyle='--', linewidth=2, label='Uniform DCA Baseline (1.0x)')
     

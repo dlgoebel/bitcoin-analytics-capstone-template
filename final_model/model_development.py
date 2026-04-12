@@ -19,19 +19,23 @@ MIN_W = 1e-6
 DYNAMIC_STRENGTH = 3.5  # Multiplier for weight adjustments
 MVRV_ROLLING_WINDOW = 365
 VOLATILITY_WINDOW = 30
+MA_WINDOW = 200
+MVRV_GRADIENT_WINDOW = 30
 
 # =============================================================================
 # Feature Engineering
 # =============================================================================
 
 def precompute_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Compute MVRV, Momentum, and Volatility features for weight calculation.
+    """Compute MVRV, Momentum, Volatility, and Regime features for weight calculation.
 
     Features (all lagged 1 day to prevent look-ahead bias):
     - mvrv_zscore: 365-day rolling Z-score of MVRV.
     - roi_30d: 30-day return momentum.
     - roi_1yr: 365-day return momentum.
     - volatility_pct: 30-day rolling volatility, ranked as a percentile [0, 1].
+    - price_vs_ma: Price relative to 200-day moving average.
+    - mvrv_gradient: 30-day change in MVRV Z-score.
 
     Args:
         df: DataFrame with price and MVRV columns
@@ -68,17 +72,30 @@ def precompute_features(df: pd.DataFrame) -> pd.DataFrame:
         raw=False
     ).fillna(0.5)
 
+    # 4. Price vs 200-day MA (Regime Signal)
+    ma_200 = price.rolling(MA_WINDOW, min_periods=100).mean()
+    price_vs_ma = (price / ma_200) - 1.0
+    price_vs_ma = price_vs_ma.fillna(0).clip(-0.8, 2.0)
+
+    # 5. MVRV Gradient (Trajectory Signal)
+    mvrv_gradient = mvrv_zscore.diff(MVRV_GRADIENT_WINDOW).fillna(0).clip(-3, 3)
+
     # Build DataFrame
     features = pd.DataFrame({
         PRICE_COL: price,
         "mvrv_zscore": mvrv_zscore,
         "roi_30d": roi_30d,
         "roi_1yr": roi_1yr,
-        "volatility_pct": volatility_pct
+        "volatility_pct": volatility_pct,
+        "price_vs_ma": price_vs_ma,
+        "mvrv_gradient": mvrv_gradient
     }, index=price.index)
 
     # Lag signals by 1 day to prevent look-ahead bias
-    signal_cols = ["mvrv_zscore", "roi_30d", "roi_1yr", "volatility_pct"]
+    signal_cols = [
+        "mvrv_zscore", "roi_30d", "roi_1yr", 
+        "volatility_pct", "price_vs_ma", "mvrv_gradient"
+    ]
     features[signal_cols] = features[signal_cols].shift(1).fillna(0)
 
     return features
@@ -91,15 +108,19 @@ def compute_dynamic_multiplier(
     mvrv_zscore: np.ndarray,
     roi_30d: np.ndarray,
     roi_1yr: np.ndarray,
-    volatility_pct: np.ndarray
+    volatility_pct: np.ndarray,
+    price_vs_ma: np.ndarray,
+    mvrv_gradient: np.ndarray
 ) -> np.ndarray:
-    """Compute weight multiplier from MVRV, Momentum, and Volatility.
+    """Compute weight multiplier from MVRV, Momentum, Volatility, and Regime.
 
     Args:
         mvrv_zscore: MVRV Z-score in [-4, 4]
         roi_30d: 30-day return
         roi_1yr: 1-year return
         volatility_pct: Volatility percentile [0, 1]
+        price_vs_ma: Price relative to 200 DMA
+        mvrv_gradient: 30-day change in MVRV Z-score
 
     Returns:
         Multipliers centred around 1.0
@@ -107,20 +128,37 @@ def compute_dynamic_multiplier(
     # 1. MVRV Value Signal (Negative Z-score = undervalued = buy more)
     mvrv_signal = -mvrv_zscore
     
-    # Asymmetric boost: Bitcoin bottoms are sharp. If Z < -1.5, buy aggressively.
-    mvrv_boost = np.where(mvrv_zscore < -1.5, (mvrv_zscore + 1.5)**2, 0)
-    mvrv_signal = mvrv_signal + mvrv_boost
+    # Asymmetric boost: Bitcoin bottoms are sharp.
+    deep_value = mvrv_zscore < -1.5
+    improving = mvrv_gradient > 0
+    
+    # Base boost for deep value
+    mvrv_boost = np.where(deep_value, (mvrv_zscore + 1.5)**2, 0)
+    
+    # Extra boost if deep value AND improving (bottom confirmation)
+    bottom_confirmation_boost = np.where(deep_value & improving, mvrv_boost * 0.75, 0)
+    
+    mvrv_signal = mvrv_signal + mvrv_boost + bottom_confirmation_boost
 
-    # 2. Momentum Signal (Positive ROI = trend confirmation)
-    # We scale the ROIs to keep them in a reasonable range
+    # 2. Regime Multiplier (Price vs 200 DMA)
+    # Suppress buying in bull markets, boost in bear markets
+    regime_multiplier = np.where(
+        price_vs_ma < 0,
+        1.0 + np.abs(price_vs_ma),          # Boost up to 1.8x when below MA
+        np.maximum(0.05, 1.0 - price_vs_ma) # Suppress heavily when above MA
+    )
+
+    # 3. Momentum Signal (Positive ROI = trend confirmation)
     mom_signal = (roi_30d * 1.5) + (roi_1yr * 0.25)
 
     # Combine signals: 75% Valuation (MVRV), 25% Momentum
     combined = (mvrv_signal * 0.75) + (mom_signal * 0.25)
+    
+    # Apply regime multiplier
+    combined = combined * regime_multiplier
 
-    # 3. Volatility Dampening
+    # 4. Volatility Dampening
     # If volatility is in the top 20% historically, market is chaotic.
-    # Dampen the signal by up to 40%, pulling weights closer to uniform DCA.
     dampener = np.where(
         volatility_pct > 0.8,
         1.0 - 0.4 * ((volatility_pct - 0.8) / 0.2),
@@ -158,9 +196,13 @@ def compute_weights_fast(
     roi_30d = _clean_array(df["roi_30d"].values)
     roi_1yr = _clean_array(df["roi_1yr"].values)
     volatility_pct = _clean_array(df["volatility_pct"].values)
+    price_vs_ma = _clean_array(df["price_vs_ma"].values)
+    mvrv_gradient = _clean_array(df["mvrv_gradient"].values)
 
     # Compute dynamic weights
-    dyn = compute_dynamic_multiplier(mvrv_zscore, roi_30d, roi_1yr, volatility_pct)
+    dyn = compute_dynamic_multiplier(
+        mvrv_zscore, roi_30d, roi_1yr, volatility_pct, price_vs_ma, mvrv_gradient
+    )
     raw = base * dyn
 
     # Allocate with stability
@@ -189,6 +231,10 @@ def compute_window_weights(
         )
         if "volatility_pct" in placeholder.columns:
             placeholder["volatility_pct"] = 0.5
+        if "price_vs_ma" in placeholder.columns:
+            placeholder["price_vs_ma"] = 0.0
+        if "mvrv_gradient" in placeholder.columns:
+            placeholder["mvrv_gradient"] = 0.0
             
         features_df = pd.concat([features_df, placeholder]).sort_index()
 
