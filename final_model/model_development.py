@@ -6,12 +6,12 @@ from template.model_development_template import (
     _clean_array,
     allocate_sequential_stable,
 )
+from template.prelude_template import load_polymarket_data
 
 # =============================================================================
 # Feature Flags for Systematic Testing
 # =============================================================================
-USE_ASYMMETRIC_MOMENTUM = True  # Toggle Idea 2
-USE_POLYMARKET_FED = False      # Toggle Idea 1 (Requires EDA data loading logic)
+USE_POLYMARKET_FED = True  # Toggle Idea 1 (Polymarket Fed Uncertainty)
 
 # =============================================================================
 # Constants
@@ -36,11 +36,76 @@ def load_fed_uncertainty(target_index: pd.DatetimeIndex) -> pd.Series:
     """
     Load Polymarket Fed uncertainty signal.
     
-    TODO: Replace this placeholder with the exact data loading logic from your EDA.
-    The signal should ideally be scaled between 0.0 (certain) and 1.0 (highly uncertain).
+    Calculates uncertainty as 4 * p * (1-p), which maps odds of 0.5 to 1.0 (max uncertainty)
+    and odds of 0.0 or 1.0 to 0.0 (min uncertainty).
     """
-    # Returning a neutral 0.5 placeholder for now
-    return pd.Series(0.5, index=target_index)
+    try:
+        pm_data = load_polymarket_data()
+        
+        # Dynamically find the correct keys in the dictionary
+        markets_key = next((k for k in pm_data.keys() if "markets" in k), None)
+        odds_key = next((k for k in pm_data.keys() if "odds_history" in k), None)
+        
+        if not markets_key or not odds_key:
+            logging.warning("Polymarket markets or odds_history not found. Using neutral uncertainty.")
+            return pd.Series(0.5, index=target_index)
+            
+        df_markets = pm_data[markets_key]
+        df_odds = pm_data[odds_key]
+
+        # Filter for Fed/Interest Rate/FOMC markets
+        question_col = "question" if "question" in df_markets.columns else "title"
+        if question_col not in df_markets.columns:
+            logging.warning(f"Question column not found in markets. Columns: {df_markets.columns}")
+            return pd.Series(0.5, index=target_index)
+            
+        fed_markets = df_markets[
+            df_markets[question_col].str.contains("Fed|Interest Rate|FOMC|rate cut", case=False, na=False)
+        ]
+
+        if fed_markets.empty:
+            return pd.Series(0.5, index=target_index)
+
+        # Merge odds with fed markets
+        market_id_col = "market_id" if "market_id" in df_markets.columns else "id"
+        odds_market_id_col = "market_id" if "market_id" in df_odds.columns else "id"
+        
+        fed_odds = df_odds.merge(
+            fed_markets[[market_id_col]], left_on=odds_market_id_col, right_on=market_id_col, how="inner"
+        )
+
+        if fed_odds.empty:
+            return pd.Series(0.5, index=target_index)
+
+        # Convert timestamp to daily
+        fed_odds["date"] = pd.to_datetime(fed_odds["timestamp"]).dt.floor("D")
+
+        # Find the odds column (usually 'price' in Polymarket data)
+        odds_col = None
+        for col in ["price", "odds", "probability", "implied_probability"]:
+            if col in fed_odds.columns:
+                odds_col = col
+                break
+        
+        if odds_col is None:
+            logging.warning(f"Odds column not found. Columns: {fed_odds.columns}")
+            return pd.Series(0.5, index=target_index)
+
+        # Calculate uncertainty: 4 * p * (1-p)
+        fed_odds["uncertainty"] = 4.0 * fed_odds[odds_col] * (1.0 - fed_odds[odds_col])
+
+        # Aggregate by date (mean uncertainty across all active Fed markets)
+        daily_uncertainty = fed_odds.groupby("date")["uncertainty"].mean()
+
+        # Reindex to target index, forward fill missing days, fill NaNs with 0.5 (neutral)
+        uncertainty_series = daily_uncertainty.reindex(target_index).ffill().fillna(0.5)
+        
+        # Smooth it slightly to avoid erratic daily jumps
+        return uncertainty_series.rolling(7, min_periods=1).mean().fillna(0.5)
+
+    except Exception as e:
+        logging.warning(f"Could not load Polymarket Fed data: {e}")
+        return pd.Series(0.5, index=target_index)
 
 def precompute_features(df: pd.DataFrame) -> pd.DataFrame:
     """Compute MVRV, Momentum, Volatility, Regime, and Macro features.
@@ -98,7 +163,10 @@ def precompute_features(df: pd.DataFrame) -> pd.DataFrame:
     mvrv_gradient = mvrv_zscore.diff(MVRV_GRADIENT_WINDOW).fillna(0).clip(-3, 3)
     
     # 6. Polymarket Fed Uncertainty
-    fed_uncertainty = load_fed_uncertainty(price.index)
+    if USE_POLYMARKET_FED:
+        fed_uncertainty = load_fed_uncertainty(price.index)
+    else:
+        fed_uncertainty = pd.Series(0.5, index=price.index)
 
     # Build DataFrame
     features = pd.DataFrame({
@@ -163,17 +231,8 @@ def compute_dynamic_multiplier(
     
     value_score = value_score + value_boost + confirmation_boost
 
-    # 2. Momentum Score (Regime-Asymmetric Toggle)
-    if USE_ASYMMETRIC_MOMENTUM:
-        # Bull market: reward momentum (trend following)
-        # Bear market: discount momentum (ignore dead cat bounces, focus on value)
-        mom_score = np.where(
-            price_vs_ma > 0,
-            roi_30d * 2.5,
-            roi_30d * 0.5
-        )
-    else:
-        mom_score = roi_30d * 2.0
+    # 2. Momentum Score
+    mom_score = roi_30d * 2.0
 
     # 3. Combine Base Signals
     base_signal = (value_score * 0.8) + (mom_score * 0.2)
@@ -191,7 +250,8 @@ def compute_dynamic_multiplier(
     if USE_POLYMARKET_FED:
         # EDA Finding #5: High Fed uncertainty predicts lower forward volatility.
         # If uncertainty is high (>0.5), we increase the threshold before dampening kicks in.
-        dampener_threshold = 0.85 + (fed_uncertainty - 0.5) * 0.1
+        # This allows the model to keep buying during volatile periods if macro uncertainty is high.
+        dampener_threshold = 0.85 + (fed_uncertainty - 0.5) * 0.15
         dampener = np.where(
             volatility_pct > dampener_threshold,
             1.0 - 0.5 * ((volatility_pct - dampener_threshold) / 0.15),
