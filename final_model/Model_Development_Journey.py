@@ -56,6 +56,7 @@ warnings.filterwarnings('ignore')
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 
 from template.prelude_template import load_data, compute_cycle_spd
 from template.model_development_template import _clean_array, allocate_sequential_stable
@@ -63,7 +64,8 @@ from template.backtest_template import (
     create_performance_comparison_chart,
     create_excess_percentile_distribution,
     create_win_loss_comparison,
-    create_cumulative_performance
+    create_cumulative_performance,
+    create_performance_metrics_summary
 )
 
 import example_1.model_development_example_1 as ex1
@@ -122,6 +124,56 @@ print(f"Excess percentile: mean={excess_percentile_ex1.mean():.2f}%, median={exc
 print(f"Relative improvement: mean={relative_improvements_ex1.mean():.2f}%, median={relative_improvements_ex1.median():.2f}%")
 print(f"Ratio (dynamic/uniform): mean={(df_spd_ex1['dynamic_percentile'] / df_spd_ex1['uniform_percentile']).mean():.2f}, median={(df_spd_ex1['dynamic_percentile'] / df_spd_ex1['uniform_percentile']).median():.2f}\n")
 
+# %%
+def plot_ex1_weights(name="Example 1 Benchmark", color="#64748b"):
+    """Visualise the Example 1 model's allocation behaviour during the 2021-2023 cycle."""
+    start_date = pd.Timestamp("2021-01-01")
+    end_date = pd.Timestamp("2023-12-31")
+
+    df_window = features_ex1.loc[start_date:end_date].copy()
+    
+    # Compute weights for this specific window
+    weights = wrapper_ex1(df_window)
+
+    # Calculate multiplier vs uniform DCA
+    uniform_weight = 1.0 / len(df_window)
+    multiplier = weights / uniform_weight
+
+    price = df_window["PriceUSD_coinmetrics"]
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True, gridspec_kw={'height_ratios': [1, 1.5]})
+
+    # Top subplot: Price
+    ax1.plot(price.index, price.values, color='black', linewidth=1.5, label='BTC Price (USD)')
+    ax1.set_yscale('log')
+    ax1.set_ylabel('Price (USD) - Log Scale')
+    ax1.set_title(f'{name} - Allocation Weights (2021-2023)', fontsize=12, fontweight='bold')
+    ax1.grid(True, alpha=0.3)
+    ax1.legend(loc='upper left')
+
+    # Highlight events
+    events = {'2021 ATH': '2021-11-10', 'Luna Crash': '2022-05-09', 'FTX Crash': '2022-11-08'}
+    for ev_name, date in events.items():
+        ts = pd.Timestamp(date)
+        if ts in price.index:
+            ax1.axvline(ts, color='red', linestyle='--', alpha=0.5)
+            ax1.text(ts, price.max(), f' {ev_name}', rotation=90, va='top', alpha=0.7)
+            ax2.axvline(ts, color='red', linestyle='--', alpha=0.5)
+
+    # Bottom subplot: Multiplier
+    ax2.plot(price.index, multiplier, color=color, linewidth=1.5, alpha=0.8, label=name)
+    ax2.axhline(1.0, color='gray', linestyle='--', linewidth=2, label='Uniform DCA Baseline (1.0x)')
+    ax2.set_ylabel('Allocation Multiplier (x Uniform)')
+    ax2.grid(True, alpha=0.3)
+    ax2.legend(loc='upper left')
+
+    ax2.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
+    ax2.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.show()
+
+plot_ex1_weights()
 
 # %% [markdown]
 # ### Example performance
@@ -225,22 +277,31 @@ def evaluate_model(multiplier_func, name="Model"):
     uniform_pct_safe = df_spd["uniform_percentile"].replace(0, 0.01)
     relative_improvements = excess_percentile / uniform_pct_safe * 100
     
+    metrics = {
+        'score': score,
+        'win_rate': win_rate,
+        'exp_decay_percentile': exp_avg_pct,
+        'mean_excess': excess_percentile.mean(),
+        'median_excess': excess_percentile.median(),
+        'relative_improvement_pct_mean': relative_improvements.mean(),
+        'relative_improvement_pct_median': relative_improvements.median(),
+        'mean_ratio': (df_spd['dynamic_percentile'] / df_spd['uniform_percentile']).mean(),
+        'median_ratio': (df_spd['dynamic_percentile'] / df_spd['uniform_percentile']).median(),
+        'total_windows': len(df_spd),
+        'wins': (df_spd["dynamic_percentile"] > df_spd["uniform_percentile"]).sum(),
+        'losses': (df_spd["dynamic_percentile"] <= df_spd["uniform_percentile"]).sum()
+    }
+    
     print(f"--- Results: {name} ---")
     print(f"Final Model Score: {score:.2f}%")
     print(f"Win Rate: {win_rate:.2f}%")
     print(f"Excess percentile: mean={excess_percentile.mean():.2f}%, median={excess_percentile.median():.2f}%")
     print(f"Relative improvement: mean={relative_improvements.mean():.2f}%, median={relative_improvements.median():.2f}%")
     print(f"Ratio (dynamic/uniform): mean={(df_spd['dynamic_percentile'] / df_spd['uniform_percentile']).mean():.2f}, median={(df_spd['dynamic_percentile'] / df_spd['uniform_percentile']).median():.2f}\n")
-    return df_spd
+    return df_spd, metrics
 
 
 # %%
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
-from template.model_development_template import _clean_array, allocate_sequential_stable
-
 def plot_model_weights(multiplier_func, name, color='#10b981'):
     """Visualise the model's allocation behaviour during the 2021-2023 cycle."""
     start_date = pd.Timestamp("2021-01-01")
@@ -323,7 +384,7 @@ def multiplier_v1(z, r30, r1y, v, pma, g, a, f):
     multiplier = np.exp(adjustment) * dampener
     return np.where(np.isfinite(multiplier), multiplier, 1.0)
 
-df_spd_v1 = evaluate_model(multiplier_v1, "V1: Baseline")
+df_spd_v1, metrics_v1 = evaluate_model(multiplier_v1, "V1: Baseline")
 
 # %%
 #from IPython.display import Image, display
@@ -357,7 +418,7 @@ def multiplier_v2(z, r30, r1y, v, pma, g, a, f):
     multiplier = np.exp(adjustment)
     return np.where(np.isfinite(multiplier), multiplier, 1.0)
 
-df_spd_v2 = evaluate_model(multiplier_v2, "V2: The Sniper")
+df_spd_v2, metrics_v2 = evaluate_model(multiplier_v2, "V2: The Sniper")
 
 # %%
 #from IPython.display import Image, display
@@ -388,7 +449,7 @@ def multiplier_v3(z, r30, r1y, v, pma, g, a, f):
     multiplier = np.exp(adjustment)
     return np.where(np.isfinite(multiplier), multiplier, 1.0)
 
-df_spd_v3 = evaluate_model(multiplier_v3, "V3: Multiplicative Bug")
+df_spd_v3, metrics_v3 = evaluate_model(multiplier_v3, "V3: Multiplicative Bug")
 
 # %%
 #from IPython.display import Image, display
@@ -428,7 +489,7 @@ def multiplier_v4(z, r30, r1y, v, pma, g, a, f):
     multiplier = np.exp(adjustment)
     return np.where(np.isfinite(multiplier), multiplier, 1.0)
 
-df_spd_v4 = evaluate_model(multiplier_v4, "V4: Log-Space Additivity")
+df_spd_v4, metrics_v4 = evaluate_model(multiplier_v4, "V4: Log-Space Additivity")
 
 # %%
 #from IPython.display import Image, display
@@ -493,7 +554,7 @@ def multiplier_v5(z, r30, r1y, v, pma, g, a, f):
     multiplier = np.exp(adjustment)
     return np.where(np.isfinite(multiplier), multiplier, 1.0)
 
-df_spd_v5 = evaluate_model(multiplier_v5, "V5: Advanced Signal Processing (Final Model)")
+df_spd_v5, metrics_v5 = evaluate_model(multiplier_v5, "V5: Advanced Signal Processing (Final Model)")
 
 # %%
 plot_model_weights(multiplier_v5, "V5: Advanced Signal Processing (Final Model)", color="#f59e0b")
@@ -524,6 +585,7 @@ create_performance_comparison_chart(df_spd_v5, str(output_dir))
 create_excess_percentile_distribution(df_spd_v5, str(output_dir))
 create_win_loss_comparison(df_spd_v5, str(output_dir))
 create_cumulative_performance(df_spd_v5, str(output_dir))
+create_performance_metrics_summary(df_spd_v5, metrics_v5, str(output_dir))
 
 # %% [markdown]
 # ### Performance Comparison
