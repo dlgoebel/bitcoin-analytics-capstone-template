@@ -18,7 +18,7 @@ MVRV_COL = "CapMVRVCur"
 MIN_W = 1e-6
 DYNAMIC_STRENGTH = 2.5  # Calibrated for additive log-space shifts
 MVRV_ROLLING_WINDOW = 365
-VOLATILITY_WINDOW = 30
+VOLATILITY_WINDOW = 90  # Increased to 90 days for macro stability (from Ex 1)
 MA_WINDOW = 200
 MVRV_GRADIENT_WINDOW = 30
 
@@ -33,9 +33,10 @@ def precompute_features(df: pd.DataFrame) -> pd.DataFrame:
     - mvrv_zscore: 365-day rolling Z-score of MVRV.
     - roi_30d: 30-day return momentum.
     - roi_1yr: 365-day return momentum.
-    - volatility_pct: 30-day rolling volatility, ranked as a percentile [0, 1].
+    - volatility_pct: 90-day rolling volatility, ranked as a percentile [0, 1].
     - price_vs_ma: Price relative to 200-day moving average.
-    - mvrv_gradient: 30-day change in MVRV Z-score.
+    - mvrv_gradient: Smoothed 30-day change in MVRV Z-score.
+    - mvrv_acceleration: Smoothed 14-day change in MVRV gradient.
 
     Args:
         df: DataFrame with price and MVRV columns
@@ -64,10 +65,10 @@ def precompute_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # 3. Volatility Dampener (Tertiary Signal)
     daily_ret = price.pct_change().fillna(0)
-    vol_30d = daily_ret.rolling(VOLATILITY_WINDOW, min_periods=15).std().fillna(0)
+    vol_90d = daily_ret.rolling(VOLATILITY_WINDOW, min_periods=22).std().fillna(0)
     
     # Normalize volatility to a rolling percentile [0, 1]
-    volatility_pct = vol_30d.rolling(365, min_periods=180).apply(
+    volatility_pct = vol_90d.rolling(360, min_periods=90).apply(
         lambda x: (x.iloc[-1] > x[:-1]).sum() / max(len(x) - 1, 1) if len(x) > 1 else 0.5,
         raw=False
     ).fillna(0.5)
@@ -77,8 +78,14 @@ def precompute_features(df: pd.DataFrame) -> pd.DataFrame:
     price_vs_ma = (price / ma_200) - 1.0
     price_vs_ma = price_vs_ma.fillna(0).clip(-0.8, 2.0)
 
-    # 5. MVRV Gradient (Trajectory Signal)
-    mvrv_gradient = mvrv_zscore.diff(MVRV_GRADIENT_WINDOW).fillna(0).clip(-3, 3)
+    # 5. MVRV Gradient & Acceleration (Trajectory Signals)
+    gradient_raw = mvrv_zscore.diff(MVRV_GRADIENT_WINDOW)
+    gradient_smooth = gradient_raw.ewm(span=MVRV_GRADIENT_WINDOW, adjust=False).mean()
+    mvrv_gradient = np.tanh(gradient_smooth * 2).fillna(0)
+
+    accel_raw = mvrv_gradient.diff(14)
+    accel_smooth = accel_raw.ewm(span=14, adjust=False).mean()
+    mvrv_acceleration = np.tanh(accel_smooth * 3).fillna(0)
 
     # Build DataFrame
     features = pd.DataFrame({
@@ -88,13 +95,14 @@ def precompute_features(df: pd.DataFrame) -> pd.DataFrame:
         "roi_1yr": roi_1yr,
         "volatility_pct": volatility_pct,
         "price_vs_ma": price_vs_ma,
-        "mvrv_gradient": mvrv_gradient
+        "mvrv_gradient": mvrv_gradient,
+        "mvrv_acceleration": mvrv_acceleration
     }, index=price.index)
 
     # Lag signals by 1 day to prevent look-ahead bias
     signal_cols = [
         "mvrv_zscore", "roi_30d", "roi_1yr", 
-        "volatility_pct", "price_vs_ma", "mvrv_gradient"
+        "volatility_pct", "price_vs_ma", "mvrv_gradient", "mvrv_acceleration"
     ]
     features[signal_cols] = features[signal_cols].shift(1).fillna(0)
 
@@ -110,9 +118,10 @@ def compute_dynamic_multiplier(
     roi_1yr: np.ndarray,
     volatility_pct: np.ndarray,
     price_vs_ma: np.ndarray,
-    mvrv_gradient: np.ndarray
+    mvrv_gradient: np.ndarray,
+    mvrv_acceleration: np.ndarray
 ) -> np.ndarray:
-    """Compute weight multiplier using additive log-space shifts.
+    """Compute weight multiplier using additive log-space shifts and Ex 1 enhancements.
 
     Args:
         mvrv_zscore: MVRV Z-score in [-4, 4]
@@ -120,7 +129,8 @@ def compute_dynamic_multiplier(
         roi_1yr: 1-year return
         volatility_pct: Volatility percentile [0, 1]
         price_vs_ma: Price relative to 200 DMA
-        mvrv_gradient: 30-day change in MVRV Z-score
+        mvrv_gradient: Smoothed 30-day change in MVRV Z-score
+        mvrv_acceleration: Smoothed 14-day change in MVRV gradient
 
     Returns:
         Multipliers centred around 1.0
@@ -128,17 +138,25 @@ def compute_dynamic_multiplier(
     # 1. Value Score (MVRV)
     value_score = -mvrv_zscore
     
-    # Non-linear boost for deep value + improving trajectory
-    deep_value = mvrv_zscore < -1.0
-    improving = mvrv_gradient > 0
+    # Asymmetric Extreme Boost (from Example 1)
+    # Bitcoin's MVRV is asymmetric - extreme lows are rare opportunities, 
+    # while extreme highs often precede corrections.
+    boost = np.zeros_like(mvrv_zscore)
     
-    # Add extra weight when deeply undervalued
-    value_boost = np.where(deep_value, np.abs(mvrv_zscore) - 1.0, 0)
+    # Deep value (Z < -2): Strong positive boost
+    boost = np.where(mvrv_zscore < -2.0, 0.8 * (mvrv_zscore + 2.0)**2 + 0.5, boost)
+    # Value (-2 <= Z < -1): Linear positive boost
+    boost = np.where((mvrv_zscore >= -2.0) & (mvrv_zscore < -1.0), -0.5 * mvrv_zscore, boost)
+    # Caution (1.5 <= Z < 2.5): Moderate negative boost
+    boost = np.where((mvrv_zscore >= 1.5) & (mvrv_zscore < 2.5), -0.3 * (mvrv_zscore - 1.5), boost)
+    # Danger (Z >= 2.5): Strong negative boost
+    boost = np.where(mvrv_zscore >= 2.5, -0.5 * (mvrv_zscore - 2.5)**2 - 0.3, boost)
     
     # Add confirmation weight when undervalued AND starting to rise
-    confirmation_boost = np.where(deep_value & improving, value_boost * 1.0, 0)
+    improving = mvrv_gradient > 0
+    confirmation_boost = np.where((mvrv_zscore < -1.0) & improving, np.abs(mvrv_zscore) * 0.5, 0)
     
-    value_score = value_score + value_boost + confirmation_boost
+    value_score = value_score + boost + confirmation_boost
 
     # 2. Momentum Score
     mom_score = roi_30d * 2.0
@@ -155,7 +173,37 @@ def compute_dynamic_multiplier(
 
     combined = base_signal + regime_shift
 
-    # 5. Volatility Dampening
+    # 5. Acceleration & Confidence Modifiers (from Example 1)
+    # Momentum building/reversing
+    same_direction = (mvrv_acceleration * mvrv_gradient) > 0
+    accel_modifier = np.where(
+        same_direction,
+        1.0 + 0.3 * np.abs(mvrv_acceleration),  # Amplify if momentum building
+        1.0 - 0.2 * np.abs(mvrv_acceleration)   # Dampen if potential reversal
+    )
+    
+    # Signal agreement (MVRV and MA pointing same way)
+    z_signal = -mvrv_zscore / 4.0
+    ma_signal = -price_vs_ma
+    gradient_alignment = np.where(
+        z_signal < 0,
+        np.where(mvrv_gradient > 0, 1.0, 0.5),
+        np.where(mvrv_gradient < 0, 1.0, 0.5)
+    )
+    signal_std = np.std([z_signal, ma_signal], axis=0)
+    agreement = 1.0 - np.clip(signal_std, 0, 1)
+    confidence = agreement * 0.7 + gradient_alignment * 0.3
+    
+    confidence_boost = np.where(
+        confidence > 0.7,
+        1.0 + 0.15 * (confidence - 0.7) / 0.3,
+        1.0
+    )
+
+    # Apply modifiers
+    combined = combined * accel_modifier * confidence_boost
+
+    # 6. Volatility Dampening
     # Extreme volatility (top 15%) reduces allocation
     dampener = np.where(
         volatility_pct > 0.85,
@@ -195,10 +243,16 @@ def compute_weights_fast(
     volatility_pct = _clean_array(df["volatility_pct"].values)
     price_vs_ma = _clean_array(df["price_vs_ma"].values)
     mvrv_gradient = _clean_array(df["mvrv_gradient"].values)
+    
+    # Handle mvrv_acceleration gracefully if missing (e.g. older cached features)
+    if "mvrv_acceleration" in df.columns:
+        mvrv_acceleration = _clean_array(df["mvrv_acceleration"].values)
+    else:
+        mvrv_acceleration = np.zeros_like(mvrv_zscore)
 
     # Compute dynamic weights
     dyn = compute_dynamic_multiplier(
-        mvrv_zscore, roi_30d, roi_1yr, volatility_pct, price_vs_ma, mvrv_gradient
+        mvrv_zscore, roi_30d, roi_1yr, volatility_pct, price_vs_ma, mvrv_gradient, mvrv_acceleration
     )
     raw = base * dyn
 
@@ -232,6 +286,8 @@ def compute_window_weights(
             placeholder["price_vs_ma"] = 0.0
         if "mvrv_gradient" in placeholder.columns:
             placeholder["mvrv_gradient"] = 0.0
+        if "mvrv_acceleration" in placeholder.columns:
+            placeholder["mvrv_acceleration"] = 0.0
             
         features_df = pd.concat([features_df, placeholder]).sort_index()
 

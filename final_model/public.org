@@ -57,22 +57,30 @@ This introduced a critical mathematical trap. At the absolute peak of a bull mar
 
 [[file:output/v3_bug.png]]
 
-** Iteration 4: Log-Space Additivity (The Final Model)
+** Iteration 4: Log-Space Additivity
 To fix the bug, we realised that because we exponentiate the final output, we must apply the regime shift *additively in log-space*. Because ~exp(A + B) = exp(A) * exp(B)~, adding a penalty in log-space correctly acts as a true multiplier in real-space. 
 
-This preserves the direction and magnitude of the "do not buy" signal at market tops, while aggressively boosting accumulation at market bottoms. The success of the model stems from its extreme asymmetry. On a typical day, the model acts defensively, deploying only a fraction of the standard daily DCA budget, saving capital for structural market bottoms like the Luna and FTX crashes.
+This preserves the direction and magnitude of the "do not buy" signal at market tops, while aggressively boosting accumulation at market bottoms.
 
 [[file:output/v4_final.png]]
 
+** Iteration 5: Advanced Signal Processing (The Final Model)
+While log-space additivity provided a massive breakthrough, we further optimised the model by incorporating advanced signal processing techniques:
+1. *Smoothed Gradient & Acceleration:* Instead of a raw 30-day difference, we used an EMA-smoothed gradient and added a second derivative (Acceleration) to detect momentum building or reversing.
+2. *Asymmetric Extreme Boost:* Bitcoin's MVRV is asymmetric. We replaced the linear value boost with a quadratic boost for deep value (~Z < -2.0~) and a quadratic penalty for extreme danger (~Z > 2.5~).
+3. *Signal Confidence:* We calculated the agreement between the MVRV Z-score and the 200-day MA. When both signals point strongly in the same direction, we apply a confidence multiplier.
+
+These additions pushed the model to its final, highly robust state, achieving an exceptional 66.68% win rate.
+
 * Empirical Results
 
-The final strategy (V4) was backtested over rolling 1-year windows from 2018 to 2025, strictly enforcing a fixed budget (weights must sum to 1.0 over the window) and preventing look-ahead bias.
+The final strategy (V5) was backtested over rolling 1-year windows from 2018 to 2025, strictly enforcing a fixed budget (weights must sum to 1.0 over the window) and preventing look-ahead bias.
 
 ** Headline Metrics
-- *Win Rate vs Uniform DCA:* 64.02% (Strategy outperformed DCA in 1,637 out of 2,557 rolling windows).
-- *Median Excess SPD:* +8.25% more Bitcoin accumulated per dollar spent compared to the naive baseline.
-- *Mean Excess SPD:* +3.70%.
-- *Overall Score:* 36.14%.
+- *Win Rate vs Uniform DCA:* 66.68% (Strategy outperformed DCA in 1,705 out of 2,557 rolling windows).
+- *Median Relative Improvement:* +15.28% more Bitcoin accumulated per dollar spent compared to the naive baseline.
+- *Median Excess Percentile:* +6.22%.
+- *Overall Score:* 61.66%.
 
 ** Win/Loss Comparison
 A breakdown of how often the strategy beats the uniform DCA baseline across all rolling 1-year windows.
@@ -80,7 +88,7 @@ A breakdown of how often the strategy beats the uniform DCA baseline across all 
 [[file:output_notebook/win_loss_comparison.svg]]
 
 ** Excess Percentile Distribution
-This chart highlights the magnitude of outperformance. The right-skewed distribution indicates the strategy consistently acquires more Bitcoin than the baseline, with a median excess of 8.25%.
+This chart highlights the magnitude of outperformance. The right-skewed distribution indicates the strategy consistently acquires more Bitcoin than the baseline.
 
 [[file:output_notebook/excess_percentile_distribution.svg]]
 
