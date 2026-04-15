@@ -57,6 +57,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+from IPython.display import SVG, display
 
 from template.prelude_template import load_data, compute_cycle_spd
 from template.model_development_template import _clean_array, allocate_sequential_stable
@@ -117,6 +118,25 @@ excess_percentile_ex1 = df_spd_ex1["dynamic_percentile"] - df_spd_ex1["uniform_p
 uniform_pct_safe_ex1 = df_spd_ex1["uniform_percentile"].replace(0, 0.01)
 relative_improvements_ex1 = excess_percentile_ex1 / uniform_pct_safe_ex1 * 100
 
+metrics_ex1 = {
+    'score': score_ex1,
+    'win_rate': win_rate_ex1,
+    'exp_decay_percentile': exp_avg_pct_ex1,
+    'mean_excess': excess_percentile_ex1.mean(),
+    'median_excess': excess_percentile_ex1.median(),
+    'relative_improvement_pct_mean': relative_improvements_ex1.mean(),
+    'relative_improvement_pct_median': relative_improvements_ex1.median(),
+    'mean_ratio': (df_spd_ex1['dynamic_percentile'] / df_spd_ex1['uniform_percentile']).mean(),
+    'median_ratio': (df_spd_ex1['dynamic_percentile'] / df_spd_ex1['uniform_percentile']).median(),
+    'total_windows': len(df_spd_ex1),
+    'wins': (df_spd_ex1["dynamic_percentile"] > df_spd_ex1["uniform_percentile"]).sum(),
+    'losses': (df_spd_ex1["dynamic_percentile"] <= df_spd_ex1["uniform_percentile"]).sum()
+}
+
+out_path_ex1 = Path("output_notebook") / "ex1_benchmark"
+out_path_ex1.mkdir(parents=True, exist_ok=True)
+create_performance_metrics_summary(df_spd_ex1, metrics_ex1, str(out_path_ex1))
+
 print(f"--- Results: Example 1 Benchmark ---")
 print(f"Final Model Score: {score_ex1:.2f}%")
 print(f"Win Rate: {win_rate_ex1:.2f}%")
@@ -171,6 +191,8 @@ def plot_ex1_weights(name="Example 1 Benchmark", color="#64748b"):
     ax2.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
     plt.xticks(rotation=45)
     plt.tight_layout()
+    
+    plt.savefig(out_path_ex1 / "allocation_weights.png", dpi=300, bbox_inches='tight')
     plt.show()
 
 plot_ex1_weights()
@@ -178,7 +200,7 @@ plot_ex1_weights()
 # %% [markdown]
 # ### Example performance
 #
-# The example acutally performs very well with a win rate of above 60% which is not easy to achieve in financial markets generally! It will prove
+# The example acutally performs very well with a win rate of above 60% which is not easy to achieve in financial markets generally! It will prove a strong baseline to beat.
 
 # %%
 # Precompute features once to speed up iterative testing for our models
@@ -235,7 +257,7 @@ print("Precomputing features for our models...")
 features_df = precompute_all_features(df_btc)
 
 # Evaluation Helper
-def evaluate_model(multiplier_func, name="Model"):
+def evaluate_model(multiplier_func, name="Model", out_dir_name="model"):
     def compute_weights(df):
         if df.empty: return pd.Series(dtype=float)
         
@@ -292,6 +314,13 @@ def evaluate_model(multiplier_func, name="Model"):
         'losses': (df_spd["dynamic_percentile"] <= df_spd["uniform_percentile"]).sum()
     }
     
+    # Create specific output directory for this version
+    out_path = Path("output_notebook") / out_dir_name
+    out_path.mkdir(parents=True, exist_ok=True)
+    
+    # Generate the metrics summary chart
+    create_performance_metrics_summary(df_spd, metrics, str(out_path))
+    
     print(f"--- Results: {name} ---")
     print(f"Final Model Score: {score:.2f}%")
     print(f"Win Rate: {win_rate:.2f}%")
@@ -302,7 +331,7 @@ def evaluate_model(multiplier_func, name="Model"):
 
 
 # %%
-def plot_model_weights(multiplier_func, name, color='#10b981'):
+def plot_model_weights(multiplier_func, name, out_dir_name, color='#10b981'):
     """Visualise the model's allocation behaviour during the 2021-2023 cycle."""
     start_date = pd.Timestamp("2021-01-01")
     end_date = pd.Timestamp("2023-12-31")
@@ -360,6 +389,10 @@ def plot_model_weights(multiplier_func, name, color='#10b981'):
     ax2.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
     plt.xticks(rotation=45)
     plt.tight_layout()
+    
+    out_path = Path("output_notebook") / out_dir_name
+    out_path.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out_path / "allocation_weights.png", dpi=300, bbox_inches='tight')
     plt.show()
 
 
@@ -367,11 +400,18 @@ def plot_model_weights(multiplier_func, name, color='#10b981'):
 # %% [markdown]
 # ## 1. The Starting Point (Baseline)
 #
-# Our initial model relied primarily on the MVRV Z-score and basic return momentum. While it achieved a win rate of ~60%, its mean excess Sats-Per-Dollar (SPD) was relatively low. It was buying more during cheap periods, but it wasn't aggressive enough during structural market bottoms.
+# Our initial model relied primarily on the MVRV Z-score and basic return momentum, which is what our EDA revealed as being some of the strongest factors. While it achieved a win rate of ~60%, its mean excess Sats-Per-Dollar (SPD) was relatively low. It was buying more during cheap periods, but it wasn't aggressive enough during structural market lows.
+#
+# **Mathematical Implementation:**
+# - $S_{value} = -Z$
+# - $Boost = (Z + 1.5)^2$ if $Z < -1.5$ else $0$
+# - $S_{mom} = 1.5 \times R_{30} + 0.25 \times R_{365}$
+# - $Combined = 0.75 \times (S_{value} + Boost) + 0.25 \times S_{mom}$
+# - $Dampener = 1.0 - 0.4 \times \frac{V - 0.8}{0.2}$ if $V > 0.8$ else $1.0$
+# - $Multiplier = \exp(\text{clip}(Combined \times 3.5, -4, 10)) \times Dampener$
 
 # %%
 def multiplier_v1(z, r30, r1y, v, pma, g, a, f):
-    # Simple MVRV + Momentum
     mvrv_signal = -z
     mvrv_boost = np.where(z < -1.5, (z + 1.5)**2, 0)
     mom_signal = (r30 * 1.5) + (r1y * 0.25)
@@ -384,12 +424,11 @@ def multiplier_v1(z, r30, r1y, v, pma, g, a, f):
     multiplier = np.exp(adjustment) * dampener
     return np.where(np.isfinite(multiplier), multiplier, 1.0)
 
-df_spd_v1, metrics_v1 = evaluate_model(multiplier_v1, "V1: Baseline")
+df_spd_v1, metrics_v1 = evaluate_model(multiplier_v1, "V1: Baseline", "v1_baseline")
 
 # %%
-#from IPython.display import Image, display
-#display(Image(filename="output/v1_baseline.png"))
-plot_model_weights(multiplier_v1, "V1: Baseline", color="#3b82f6")
+display(SVG(filename="output_notebook/v1_baseline/metrics_summary.svg"))
+plot_model_weights(multiplier_v1, "V1: Baseline", "v1_baseline", color="#3b82f6")
 
 
 # %% [markdown]
@@ -398,6 +437,11 @@ plot_model_weights(multiplier_v1, "V1: Baseline", color="#3b82f6")
 # Based on our EDA, we knew the 200-day Moving Average was a powerful regime filter, and the *change* in MVRV (gradient) was crucial for confirming bottoms. We added these features. 
 #
 # **The Result:** The model became a "sniper". It saved all its capital for the absolute bottom day of a crash (spiking to 95x normal allocation), but starved the rest of the bear market. The score dropped slightly because it was too concentrated.
+#
+# **Mathematical Implementation:**
+# - $Bottom\_Conf = Boost \times 0.75$ if ($Z < -1.5$ AND $g > 0$) else $0$
+# - $Regime\_Mult = 1.0 + |PMA|$ if $PMA < 0$ else $\max(0.05, 1.0 - PMA)$
+# - $Combined = [0.75 \times (S_{value} + Boost + Bottom\_Conf) + 0.25 \times S_{mom}] \times Regime\_Mult$
 
 # %%
 def multiplier_v2(z, r30, r1y, v, pma, g, a, f):
@@ -418,12 +462,11 @@ def multiplier_v2(z, r30, r1y, v, pma, g, a, f):
     multiplier = np.exp(adjustment)
     return np.where(np.isfinite(multiplier), multiplier, 1.0)
 
-df_spd_v2, metrics_v2 = evaluate_model(multiplier_v2, "V2: The Sniper")
+df_spd_v2, metrics_v2 = evaluate_model(multiplier_v2, "V2: The Sniper", "v2_sniper")
 
 # %%
-#from IPython.display import Image, display
-#display(Image(filename="output/v2_sniper.png"))
-plot_model_weights(multiplier_v2, "V2: The Sniper", color="#8b5cf6")
+display(SVG(filename="output_notebook/v2_sniper/metrics_summary.svg"))
+plot_model_weights(multiplier_v2, "V2: The Sniper", "v2_sniper", color="#8b5cf6")
 
 
 # %% [markdown]
@@ -432,6 +475,13 @@ plot_model_weights(multiplier_v2, "V2: The Sniper", color="#8b5cf6")
 # To fix the "sniper" issue, we attempted to implement *Regime-Conditional Blending*—weighting value heavily in bear markets and momentum heavily in bull markets. 
 #
 # **The Bug:** We kept the regime modifier as a multiplier (`combined * regime_multiplier`). At the peak of a bull market, the base signal is deeply negative (e.g., `-3.0`, meaning "do not buy"). Multiplying this by a small regime fraction (e.g., `0.05`) shrank the signal to `-0.15`. When exponentiated, `exp(-0.15)` is close to `1.0x`. We accidentally forced the model to buy at normal DCA rates right at the market top! Performance plummeted.
+#
+# **Mathematical Implementation:**
+# - $S_{value} = -Z + |Z|^{1.5}$ if ($Z < -1.0$ AND $g > 0$) else $-Z$
+# - $S_{mom} = 2.0 \times R_{30} + 0.5 \times R_{365}$
+# - $Base\_Signal = 0.8 \times S_{value} + 0.2 \times S_{mom}$ if $PMA < 0$ else $0.4 \times S_{value} + 0.6 \times S_{mom}$
+# - $Regime\_Mult = 1.0 + |PMA| \times 2.0$ if $PMA < 0$ else $\max(0.2, 1.0 - PMA \times 0.75)$
+# - $Combined = Base\_Signal \times Regime\_Mult$ (This multiplication is the bug!)
 
 # %%
 def multiplier_v3(z, r30, r1y, v, pma, g, a, f):
@@ -439,7 +489,9 @@ def multiplier_v3(z, r30, r1y, v, pma, g, a, f):
     mom_score = (r30 * 2.0) + (r1y * 0.5)
     
     is_bear = pma < 0
-    combined = np.where(is_bear, (value_score * 0.8) + (mom_score * 0.2), (value_score * 0.4) + (mom_score * 0.6))
+    combined = np.where(is_bear, 
+                      (value_score * 0.8) + (mom_score * 0.2), 
+                      (value_score * 0.4) + (mom_score * 0.6))
     
     # The Bug: Multiplicative scaling of a signal that crosses zero
     regime_multiplier = np.where(is_bear, 1.0 + np.abs(pma) * 2.0, np.maximum(0.2, 1.0 - pma * 0.75))
@@ -449,22 +501,27 @@ def multiplier_v3(z, r30, r1y, v, pma, g, a, f):
     multiplier = np.exp(adjustment)
     return np.where(np.isfinite(multiplier), multiplier, 1.0)
 
-df_spd_v3, metrics_v3 = evaluate_model(multiplier_v3, "V3: Multiplicative Bug")
+df_spd_v3, metrics_v3 = evaluate_model(multiplier_v3, "V3: Multiplicative Bug", "v3_bug")
 
 # %%
-#from IPython.display import Image, display
-#display(Image(filename="output/v3_bug.png"))
-plot_model_weights(multiplier_v3, "V3: Multiplicative Bug", color="#ef4444")
+display(SVG(filename="output_notebook/v3_bug/metrics_summary.svg"))
+plot_model_weights(multiplier_v3, "V3: Multiplicative Bug", "v3_bug", color="#ef4444")
 
 
 # %% [markdown]
-# ## 4. Iteration 3: Log-Space Additivity
+# #### 4. Iteration 3: Log-Space Additivity
 #
 # To fix the bug, we realised that because we exponentiate the final output, we must apply the regime shift **additively in log-space**. 
 #
-# Because `exp(A + B) = exp(A) * exp(B)`, adding a penalty in log-space correctly acts as a true multiplier in real-space. This preserves the direction and magnitude of the "do not buy" signal at market tops, while aggressively boosting accumulation at market bottoms.
+# Because `exp(A + B) = exp(A) * exp(B)`, adding a penalty in log-space acts as a true multiplier in real-space. This preserves the direction and magnitude of the "do not buy" signal at market tops, while boosting accumulation at market bottoms.
 #
-# **The Result:** A massive breakthrough. The score jumped past 60%, with a win rate of 64% and a median relative improvement of >20%.
+# **The Result:** A good breakthrough. The score jumped past 60%, with a win rate of 64% and a median relative improvement of >14%.
+#
+# **Mathematical Implementation:**
+# - $Base\_Signal = 0.8 \times S_{value} + 0.2 \times S_{mom}$
+# - $Regime\_Shift = |PMA| \times 2.0$ if $PMA < 0$ else $-PMA \times 3.0$
+# - $Combined = Base\_Signal + Regime\_Shift$ (Additive shift in log-space)
+# - $Multiplier = \exp(\text{clip}(Combined \times 2.5 \times Dampener, -4.0, 4.5))$
 
 # %%
 def multiplier_v4(z, r30, r1y, v, pma, g, a, f):
@@ -489,12 +546,11 @@ def multiplier_v4(z, r30, r1y, v, pma, g, a, f):
     multiplier = np.exp(adjustment)
     return np.where(np.isfinite(multiplier), multiplier, 1.0)
 
-df_spd_v4, metrics_v4 = evaluate_model(multiplier_v4, "V4: Log-Space Additivity")
+df_spd_v4, metrics_v4 = evaluate_model(multiplier_v4, "V4: Log-Space Additivity", "v4_log_space")
 
 # %%
-#from IPython.display import Image, display
-#display(Image(filename="output/v4_final.png"))
-plot_model_weights(multiplier_v4, "V4: Log-Space Additivity", color="#10b981")
+display(SVG(filename="output_notebook/v4_log_space/metrics_summary.svg"))
+plot_model_weights(multiplier_v4, "V4: Log-Space Additivity", "v4_log_space", color="#10b981")
 
 # %% [markdown]
 # ## 5. Iteration 4: Advanced Signal Processing (The Final Model)
@@ -505,6 +561,19 @@ plot_model_weights(multiplier_v4, "V4: Log-Space Additivity", color="#10b981")
 # 3. **Signal Confidence** (agreement between MVRV and 200 DMA).
 #
 # **The Result:** This pushed our win rate to an exceptional 66.68% and our final score to 61.66%.
+#
+# **Mathematical Implementation:**
+# - **Asymmetric Extreme Boosts:**
+#   - If $Z < -2.0$: $Boost = 0.8 \times (Z + 2.0)^2 + 0.5$
+#   - If $-2.0 \le Z < -1.0$: $Boost = -0.5 \times Z$
+#   - If $1.5 \le Z < 2.5$: $Boost = -0.3 \times (Z - 1.5)$
+#   - If $Z \ge 2.5$: $Boost = -0.5 \times (Z - 2.5)^2 - 0.3$
+# - **Acceleration Modifier:**
+#   - $Accel\_Mod = 1.0 + 0.3 \times |a|$ if $a \times g > 0$ else $1.0 - 0.2 \times |a|$
+# - **Signal Confidence:**
+#   - $Confidence = 0.7 \times Agreement + 0.3 \times Gradient\_Alignment$
+#   - $Conf\_Boost = 1.0 + 0.15 \times \frac{Confidence - 0.7}{0.3}$ if $Confidence > 0.7$ else $1.0$
+# - $Combined = (Base\_Signal + Regime\_Shift) \times Accel\_Mod \times Conf\_Boost$
 
 # %%
 def multiplier_v5(z, r30, r1y, v, pma, g, a, f):
@@ -554,10 +623,11 @@ def multiplier_v5(z, r30, r1y, v, pma, g, a, f):
     multiplier = np.exp(adjustment)
     return np.where(np.isfinite(multiplier), multiplier, 1.0)
 
-df_spd_v5, metrics_v5 = evaluate_model(multiplier_v5, "V5: Advanced Signal Processing (Final Model)")
+df_spd_v5, metrics_v5 = evaluate_model(multiplier_v5, "V5: Advanced Signal Processing (Final Model)", "v5_final")
 
 # %%
-plot_model_weights(multiplier_v5, "V5: Advanced Signal Processing (Final Model)", color="#f59e0b")
+display(SVG(filename="output_notebook/v5_final/metrics_summary.svg"))
+plot_model_weights(multiplier_v5, "V5: Advanced Signal Processing (Final Model)", "v5_final", color="#f59e0b")
 
 # %% [markdown]
 # ## 6. Iteration 5: The Polymarket Null Result
@@ -574,45 +644,39 @@ plot_model_weights(multiplier_v5, "V5: Advanced Signal Processing (Final Model)"
 # To conclude, we generate the standard suite of performance charts for our final V5 model, demonstrating its consistency and magnitude of outperformance against uniform DCA.
 
 # %%
-import os
-from pathlib import Path
-from IPython.display import SVG, display
-output_dir = Path("output_notebook")
-output_dir.mkdir(exist_ok=True)
-
 print("Generating final performance charts...")
-create_performance_comparison_chart(df_spd_v5, str(output_dir))
-create_excess_percentile_distribution(df_spd_v5, str(output_dir))
-create_win_loss_comparison(df_spd_v5, str(output_dir))
-create_cumulative_performance(df_spd_v5, str(output_dir))
-create_performance_metrics_summary(df_spd_v5, metrics_v5, str(output_dir))
+out_path_final = Path("output_notebook") / "v5_final"
+create_performance_comparison_chart(df_spd_v5, str(out_path_final))
+create_excess_percentile_distribution(df_spd_v5, str(out_path_final))
+create_win_loss_comparison(df_spd_v5, str(out_path_final))
+create_cumulative_performance(df_spd_v5, str(out_path_final))
 
 # %% [markdown]
 # ### Performance Comparison
 # This chart shows the distribution of Sats-Per-Dollar (SPD) across all rolling windows.
 
 # %%
-display(SVG(filename=str(output_dir / "performance_comparison.svg")))
+display(SVG(filename=str(out_path_final / "performance_comparison.svg")))
 
 # %% [markdown]
 # ### Excess Percentile Distribution
 # This highlights the magnitude of outperformance. A right-skewed distribution indicates the strategy consistently acquires more Bitcoin than the baseline.
 
 # %%
-display(SVG(filename=str(output_dir / "excess_percentile_distribution.svg")))
+display(SVG(filename=str(out_path_final / "excess_percentile_distribution.svg")))
 
 # %% [markdown]
 # ### Win/Loss Comparison
 # A breakdown of how often the strategy beats the uniform DCA baseline.
 
 # %%
-display(SVG(filename=str(output_dir / "win_loss_comparison.svg")))
+display(SVG(filename=str(out_path_final / "win_loss_comparison.svg")))
 
 # %% [markdown]
 # ### Cumulative Performance
 # Tracking the cumulative advantage of the dynamic strategy over time.
 
 # %%
-display(SVG(filename=str(output_dir / "cumulative_performance.svg")))
+display(SVG(filename=str(out_path_final / "cumulative_performance.svg")))
 
 # %%
